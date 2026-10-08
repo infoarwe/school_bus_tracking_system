@@ -1,0 +1,111 @@
+openapi: 3.1.0
+info:
+  title: School Bus Tracking API
+  version: 0.1.0
+  description: |
+    API for the School Bus Tracking admin web and the Android Driver and Parent apps.
+
+    ## Conventions
+    - Base path for business endpoints: `/api/v1`. JSON fields are `snake_case`.
+    - Timestamps are RFC 3339 UTC (`2026-10-07T02:15:00Z`); calendar dates are `YYYY-MM-DD`.
+    - Success responses wrap the payload: `{"data": ...}`. Lists add
+      `"meta": {"page", "page_size", "total"}` and accept `?page=1&page_size=20` (max 100).
+    - Errors: `{"error": {"code", "message", "fields"}}`. Branch on `code`, show `message`.
+    - Auth (from Sprint 1): `Authorization: Bearer <access_token>`.
+    - Every response carries an `X-Request-ID` header; include it when reporting a bug.
+
+    ## Changelog
+    - 0.1.0: `/health`.
+servers:
+  - url: /
+    description: This server
+tags:
+  - name: System
+paths:
+  /health:
+    get:
+      tags: [System]
+      summary: Service health
+      description: Reports whether the API and its dependencies (Postgres, Redis) are reachable.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: All dependencies are up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthEnvelope"
+              example:
+                data: { status: ok, checks: { postgres: up, redis: up } }
+        "503":
+          description: At least one dependency is down.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthEnvelope"
+              example:
+                data: { status: degraded, checks: { postgres: up, redis: down } }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable code, e.g. `validation_failed`, `not_found`, `unauthorized`.
+            message:
+              type: string
+              description: Human-readable message, safe to show to users.
+            fields:
+              type: object
+              additionalProperties: { type: string }
+              description: Present on `validation_failed`; maps field name to reason.
+      example:
+        error:
+          code: validation_failed
+          message: One or more fields are invalid.
+          fields: { mobile: must be a 10-digit number }
+    PageMeta:
+      type: object
+      required: [page, page_size, total]
+      properties:
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+    Health:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [up, down]
+    HealthEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/Health"
+  responses:
+    NotFound:
+      description: Resource does not exist or is outside your school.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+security:
+  - bearerAuth: []

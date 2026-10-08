@@ -1,0 +1,27 @@
+# Env files (commit the .env.example versions only)
+.env
+.env.local
+.env.*.local
+
+# Go
+backend/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local temp
+.tmp-*
+*.log
