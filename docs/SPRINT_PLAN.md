@@ -40,21 +40,21 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S1-01 | BE | Schema: `schools`, `users`, `roles`, `user_sessions`, `audit_logs` | Migration applied |
-| S1-02 | BE | Password login for web users (bcrypt) + JWT access/refresh tokens, expiry, logout | Login returns tokens; logout revokes |
-| S1-03 | BE | OTP login API (send/verify) for Driver & Parent, with OTP rate limit + expiry | OTP verified against stub/provider |
-| S1-04 | BE | Auth middleware: parse token, load user, role, `school_id` into context | Protected route rejects missing/invalid token |
-| S1-05 | BE | RBAC middleware: `RequireRole(...)` + tenant scope helper (`school_id` forced on every query) | Test: School Admin A cannot read School B data |
-| S1-06 | BE | Account suspension + session/device list + revoke | Suspended user cannot log in |
-| S1-07 | BE | Audit log helper `audit.Record(ctx, action, entity, before, after)` | Entries written on create/update/delete |
-| S1-08 | BE | Schools CRUD (Super Admin only): profile, contacts, working days, transport config, status | API + tests |
-| S1-09 | BE | School Admin & Transport Manager user CRUD (Super Admin / School Admin) | API + tests |
-| S1-10 | BE | Seed script: one Super Admin, a demo school, a demo admin | `make seed` works |
-| S1-11 | FE | Login page, token storage, refresh handling, logout | Login → dashboard shell |
-| S1-12 | FE | Auth context + role-based route guards + role-based menu | Each role sees only its menu items |
-| S1-13 | FE | Schools list / create / edit / activate-deactivate (Super Admin) | Full CRUD from UI |
-| S1-14 | FE | School users list / create / edit / suspend | Full CRUD from UI |
-| S1-15 | BE | 2FA (TOTP) for Super Admin (optional for others) | Super Admin must pass 2FA |
+| ✅ S1-01 | BE | Schema: `schools`, `users` (role as a checked column, no roles table), `user_sessions`, `otp_codes`, `audit_logs` | Migration applied |
+| ✅ S1-02 | BE | Password login for web users (bcrypt) + JWT access/refresh tokens, expiry, logout | Login returns tokens; logout revokes |
+| ✅ S1-03 | BE | OTP login API (send/verify) for Driver & Parent, with OTP rate limit + expiry | OTP verified against stub/provider |
+| ✅ S1-04 | BE | Auth middleware: parse token, load user, role, `school_id` into context | Protected route rejects missing/invalid token |
+| ✅ S1-05 | BE | RBAC middleware: `RequireRole(...)` + tenant scope helper (`school_id` forced on every query) | Test: School Admin A cannot read School B data |
+| ✅ S1-06 | BE | Account suspension + session/device list + revoke | Suspended user cannot log in |
+| ✅ S1-07 | BE | Audit log helper `audit.Record(ctx, action, entity, before, after)` | Entries written on create/update/delete |
+| ✅ S1-08 | BE | Schools CRUD (Super Admin only): profile, contacts, working days, transport config, status | API + tests |
+| ✅ S1-09 | BE | School Admin & Transport Manager user CRUD (Super Admin / School Admin) | API + tests |
+| ✅ S1-10 | BE | Seed script: one Super Admin, a demo school, a demo admin | `go run ./cmd/seed` works |
+| ✅ S1-11 | FE | Login page, token storage, refresh handling, logout | Login → dashboard shell |
+| ✅ S1-12 | FE | Auth context + role-based route guards + role-based menu | Each role sees only its menu items |
+| ✅ S1-13 | FE | Schools list / create / edit / activate-deactivate (Super Admin) | Full CRUD from UI |
+| ✅ S1-14 | FE | School users list / create / edit / suspend | Full CRUD from UI |
+| ✅ S1-15 | BE | 2FA (TOTP) for Super Admin (optional for others) | Super Admin must pass 2FA |
 | S1-16 | API | **Handoff 1, Auth:** OTP send/verify, refresh, logout, `GET /me`, error codes; dev OTP stub documented so the mobile team can log in without SMS | Mobile team logs in against our API |
 
 ---
@@ -65,18 +65,18 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S2-01 | BE | Schema: `drivers`, `buses`, `routes`, `stops` (lat, lng, sequence, pickup_time, drop_time, geofence_radius) | Migration applied |
-| S2-02 | BE | Drivers CRUD: profile, mobile, identity details, status (active/inactive/suspended); links to a Driver user for OTP login | API + tests |
-| S2-03 | BE | Buses CRUD: vehicle number (unique per school), capacity, status (active/inactive/maintenance), GPS device info | API + tests |
-| S2-04 | BE | Routes CRUD: name, code, starting point, trip type support, status | API + tests |
-| S2-05 | BE | Stops CRUD under a route + **reorder endpoint** (sequence kept consistent in a transaction) | Reorder keeps sequence 1..N with no gaps |
-| S2-06 | BE | Validation: lat/lng range, geofence radius min/max, unique stop sequence | Invalid input → 400 with field errors |
-| S2-07 | FE | Shared table component: search, filter, pagination, status badge | Reused on all master pages |
-| S2-08 | FE | Drivers pages (list / form / status change) | CRUD from UI |
-| S2-09 | FE | Buses pages | CRUD from UI |
-| S2-10 | FE | Routes pages | CRUD from UI |
-| S2-11 | FE | Stop management: map picker to set lat/lng, drag-to-reorder list, geofence circle on map | Stops visible in order on map |
-| S2-12 | BE+FE | Permissions: Transport Manager has full access here, Driver/Parent get none via web | RBAC tests pass |
+| ✅ S2-01 | BE | Schema: `drivers`, `buses`, `routes`, `stops` (lat, lng, sequence, pickup_time, drop_time, geofence_radius) | Migration applied |
+| ✅ S2-02 | BE | Drivers CRUD: profile, mobile, identity details, status (active/inactive/suspended); links to a Driver user for OTP login | API + tests |
+| ✅ S2-03 | BE | Buses CRUD: vehicle number (unique per school), capacity, status (active/inactive/maintenance), GPS device info | API + tests |
+| ✅ S2-04 | BE | Routes CRUD: name, code, starting point, trip type support, status | API + tests |
+| ✅ S2-05 | BE | Stops CRUD under a route + **reorder endpoint** (sequence kept consistent in a transaction) | Reorder keeps sequence 1..N with no gaps |
+| ✅ S2-06 | BE | Validation: lat/lng range, geofence radius min/max, unique stop sequence | Invalid input → 400 with field errors |
+| ✅ S2-07 | FE | Shared table component: search, filter, pagination, status badge | Reused on all master pages |
+| ✅ S2-08 | FE | Drivers pages (list / form / status change) | CRUD from UI |
+| ✅ S2-09 | FE | Buses pages | CRUD from UI |
+| ✅ S2-10 | FE | Routes pages | CRUD from UI |
+| ✅ S2-11 | FE | Stop management (Leaflet + OpenStreetMap): map picker to set lat/lng, drag-to-reorder list, geofence circle on map | Stops visible in order on map |
+| ✅ S2-12 | BE+FE | Permissions: Transport Manager has full access here, Driver/Parent get none via web | RBAC tests pass |
 | S2-13 | OPS | Shared dev API environment reachable by the mobile team (HTTPS URL, seeded demo school, test driver + parent accounts) | Mobile team calls `/health` from a device |
 
 ---

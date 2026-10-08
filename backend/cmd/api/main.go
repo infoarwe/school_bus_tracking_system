@@ -10,11 +10,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // school time zones work on hosts without a tz database
 
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/auth"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/config"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/database"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/handlers"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/router"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
 )
 
 func main() {
@@ -29,7 +32,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := cfg.ValidateForAPI(); err != nil {
+		return err
+	}
 	setupLogger(cfg)
+	if cfg.OTPDevCode != "" {
+		slog.Warn("OTP_DEV_CODE is set: every OTP sent is this fixed code (development only)")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -52,6 +61,15 @@ func run() error {
 			"postgres": db.Ping,
 			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		}},
+		API: &handlers.API{
+			Store:                store.New(db),
+			Tokens:               auth.NewTokenManager(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL),
+			SMS:                  auth.LogSender{}, // TODO(S0-03): real SMS provider
+			OTPTTL:               cfg.OTPTTL,
+			OTPDevCode:           cfg.OTPDevCode,
+			RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
+		},
+		RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
 	})
 
 	srv := &http.Server{

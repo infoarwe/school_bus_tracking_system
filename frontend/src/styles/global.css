@@ -18,9 +18,79 @@ body {
   padding: 0 24px;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .app-content {
   margin: 24px;
+}
+
+.login-page {
+  min-height: 100vh;
+  padding: 16px;
+  background: #f5f5f5;
+}
+
+/* Numbered stop markers on the route map */
+.stop-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #f5a623;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.stop-marker--active {
+  background: #1677ff;
+}
+
+/* Sortable stop list on the route page */
+.stop-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.stop-row--selected {
+  border-color: #1677ff;
+  background: #f0f7ff;
+}
+
+.stop-row__handle {
+  cursor: grab;
+  color: #999;
+  padding: 4px;
+  touch-action: none;
+}
+
+.stop-row__seq {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #f5a623;
+  color: #fff;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stop-row__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }

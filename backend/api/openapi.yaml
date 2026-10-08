@@ -1,32 +1,71 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.1.0
+  version: 0.3.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
     ## Conventions
     - Base path for business endpoints: `/api/v1`. JSON fields are `snake_case`.
     - Timestamps are RFC 3339 UTC (`2026-10-07T02:15:00Z`); calendar dates are `YYYY-MM-DD`.
+    - Mobile numbers are accepted as `9876543210`, `+91 98765 43210`, etc. and always returned as `+919876543210`.
     - Success responses wrap the payload: `{"data": ...}`. Lists add
       `"meta": {"page", "page_size", "total"}` and accept `?page=1&page_size=20` (max 100).
     - Errors: `{"error": {"code", "message", "fields"}}`. Branch on `code`, show `message`.
-    - Auth (from Sprint 1): `Authorization: Bearer <access_token>`.
     - Every response carries an `X-Request-ID` header; include it when reporting a bug.
 
+    ## Authentication
+    - **Driver and Parent apps:** `POST /auth/otp/send` then `POST /auth/otp/verify` with `app` = `driver` or `parent`.
+      On the dev environment every code is `123456` (no SMS is sent).
+    - **Admin web:** `POST /auth/login` (email + password). If the response has `mfa_required: true`,
+      call `POST /auth/login/2fa` with the `mfa_token` and the authenticator code.
+    - Send `Authorization: Bearer <access_token>` on every other call.
+    - Access tokens last `expires_in` seconds (15 min). On `401`, call `POST /auth/refresh` once with the
+      refresh token; it returns a **new** refresh token and the old one stops working, so always store the
+      latest one. If refresh fails, send the user to login.
+    - Refresh tokens last 30 days. Store them in secure storage (Android Keystore / EncryptedSharedPreferences).
+
+    ## Error codes you should handle
+    | Code | Status | Meaning |
+    |---|---|---|
+    | `validation_failed` | 400 | See `fields` for per-field messages. |
+    | `unauthorized`, `token_invalid`, `session_revoked` | 401 | Try refresh once, else go to login. |
+    | `refresh_token_invalid` | 401 | Go to login. |
+    | `invalid_credentials`, `otp_invalid`, `otp_attempts_exceeded`, `invalid_2fa_code`, `mfa_token_invalid` | 401 | Show message. |
+    | `account_suspended`, `school_inactive` | 403 | Show message, log out. |
+    | `forbidden` | 403 | Role not allowed. |
+    | `2fa_setup_required` | 403 | Super Admin must set up 2FA first. |
+    | `not_found` | 404 | Missing or belongs to another school. |
+    | `conflict` | 409 | Duplicate; see `fields`. |
+    | `otp_too_soon`, `otp_rate_limited` | 429 | Wait before requesting another code. |
+
     ## Changelog
+    - 0.3.0 (Sprint 2): drivers, buses, routes, stops (admin web).
+    - 0.2.0 (Sprint 1): auth (password, 2FA, OTP, refresh, logout, me, sessions), schools, school users.
     - 0.1.0: `/health`.
 servers:
   - url: /
     description: This server
 tags:
+  - name: Auth
+    description: Login for web (email + password) and apps (mobile + OTP).
+  - name: Schools
+    description: Tenants. Super Admin manages them; staff can read their own school.
+  - name: School users
+    description: School Admins and Transport Managers of one school.
+  - name: Drivers
+  - name: Buses
+  - name: Routes & stops
+    description: Routes with ordered stops. Stop sequence is always 1..N.
   - name: System
+security:
+  - bearerAuth: []
+
 paths:
   /health:
     get:
       tags: [System]
       summary: Service health
-      description: Reports whether the API and its dependencies (Postgres, Redis) are reachable.
       operationId: getHealth
       security: []
       responses:
@@ -34,25 +73,1137 @@ paths:
           description: All dependencies are up.
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/HealthEnvelope"
-              example:
-                data: { status: ok, checks: { postgres: up, redis: up } }
+              schema: { $ref: "#/components/schemas/HealthEnvelope" }
+              example: { data: { status: ok, checks: { postgres: up, redis: up } } }
         "503":
           description: At least one dependency is down.
           content:
             application/json:
+              schema: { $ref: "#/components/schemas/HealthEnvelope" }
+
+  /api/v1/auth/otp/send:
+    post:
+      tags: [Auth]
+      summary: Send a login OTP (Driver / Parent app)
+      description: |
+        Sends a 6-digit code by SMS, valid for `expires_in` seconds. The answer is the same whether or not
+        the number is registered. Limits: one request per 30 s and 5 per hour per number.
+      operationId: sendOtp
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mobile, app]
+              properties:
+                mobile: { type: string, example: "9000000001" }
+                app: { type: string, enum: [driver, parent] }
+      responses:
+        "200":
+          description: Code sent (if the number is registered for that app).
+          content:
+            application/json:
               schema:
-                $ref: "#/components/schemas/HealthEnvelope"
-              example:
-                data: { status: degraded, checks: { postgres: up, redis: down } }
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      sent: { type: boolean }
+                      expires_in: { type: integer, description: seconds }
+              example: { data: { sent: true, expires_in: 300 } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/otp/verify:
+    post:
+      tags: [Auth]
+      summary: Verify OTP and log in (Driver / Parent app)
+      description: A code works once. After 5 wrong attempts the code is cancelled; request a new one.
+      operationId: verifyOtp
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mobile, app, code]
+              properties:
+                mobile: { type: string, example: "9000000001" }
+                app: { type: string, enum: [driver, parent] }
+                code: { type: string, example: "123456" }
+                device_name: { type: string, description: Shown in the user's session list., example: "Pixel 7" }
+      responses:
+        "200":
+          description: Logged in.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Tokens" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email + password (admin web)
+      description: For Super Admin, School Admin and Transport Manager. Drivers and parents use OTP.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                device_name: { type: string }
+      responses:
+        "200":
+          description: Logged in, or a 2FA code is needed (`mfa_required`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/LoginResult" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/auth/login/2fa:
+    post:
+      tags: [Auth]
+      summary: Complete login with an authenticator code
+      operationId: login2fa
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_token, code]
+              properties:
+                mfa_token: { type: string, description: From the login response. Valid 5 minutes. }
+                code: { type: string, example: "492039" }
+                device_name: { type: string }
+      responses:
+        "200":
+          description: Logged in.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/LoginResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Get new tokens
+      description: Returns a new access token **and a new refresh token**. The old refresh token stops working.
+      operationId: refresh
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: New tokens.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Tokens" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out this device
+      operationId: logout
+      responses:
+        "204": { description: Session ended. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user and school
+      description: Call after login and on app start.
+      operationId: getMe
+      responses:
+        "200":
+          description: The caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [user, school, two_factor_setup_required]
+                    properties:
+                      user: { $ref: "#/components/schemas/User" }
+                      school:
+                        oneOf:
+                          - $ref: "#/components/schemas/School"
+                          - type: "null"
+                        description: Null for Super Admin.
+                      two_factor_setup_required: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/auth/sessions:
+    get:
+      tags: [Auth]
+      summary: My active sessions (devices)
+      operationId: listSessions
+      responses:
+        "200":
+          description: Sessions, most recently used first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Session" }
+
+  /api/v1/auth/sessions/{sessionID}:
+    delete:
+      tags: [Auth]
+      summary: Log out one of my devices
+      operationId: revokeSession
+      parameters:
+        - { name: sessionID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Session ended. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/auth/2fa/setup:
+    post:
+      tags: [Auth]
+      summary: Start authenticator (2FA) setup (web roles)
+      description: Returns a secret and QR code to scan. 2FA is not active until `/auth/2fa/enable` succeeds.
+      operationId: setupTotp
+      responses:
+        "200":
+          description: Scan the QR code with an authenticator app.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      secret: { type: string }
+                      otpauth_url: { type: string }
+                      qr_code_png: { type: string, description: "data: URL of a PNG" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/auth/2fa/enable:
+    post:
+      tags: [Auth]
+      summary: Confirm a code and turn 2FA on
+      operationId: enableTotp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "204": { description: 2FA is on. Future logins need a code. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/schools:
+    get:
+      tags: [Schools]
+      summary: List schools (Super Admin)
+      operationId: listSchools
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: q, in: query, description: Search name or code, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+      responses:
+        "200":
+          description: Schools, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/School" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Schools]
+      summary: Create a school (Super Admin)
+      operationId: createSchool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SchoolInput" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/School" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Schools]
+      summary: Get a school (Super Admin, or staff of that school)
+      operationId: getSchool
+      responses:
+        "200":
+          description: The school.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/School" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Schools]
+      summary: Update a school (Super Admin)
+      operationId: updateSchool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SchoolInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/School" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/status:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    patch:
+      tags: [Schools]
+      summary: Activate or deactivate a school (Super Admin)
+      description: Users of an inactive school are logged out and cannot log in.
+      operationId: setSchoolStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, inactive] }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/School" }
+
+  /api/v1/schools/{schoolID}/users:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [School users]
+      summary: List School Admins and Transport Managers (Super Admin, School Admin)
+      operationId: listSchoolUsers
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: role, in: query, schema: { type: string, enum: [school_admin, transport_manager] } }
+        - { name: status, in: query, schema: { type: string, enum: [active, suspended] } }
+        - { name: q, in: query, description: "Search name, email or mobile", schema: { type: string } }
+      responses:
+        "200":
+          description: Users, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/User" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [School users]
+      summary: Create a staff user
+      description: Super Admin can create both roles; a School Admin can create Transport Managers only.
+      operationId: createSchoolUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/UserInput"
+                - type: object
+                  required: [role, password]
+                  properties:
+                    role: { type: string, enum: [school_admin, transport_manager] }
+                    password: { type: string, minLength: 8 }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/users/{userID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/UserID" }
+    get:
+      tags: [School users]
+      summary: Get a staff user
+      operationId: getSchoolUser
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [School users]
+      summary: Update name, email, mobile
+      operationId: updateSchoolUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/users/{userID}/status:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/UserID" }
+    patch:
+      tags: [School users]
+      summary: Suspend or reactivate
+      description: Suspending logs the user out of every device.
+      operationId: setSchoolUserStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, suspended] }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/schools/{schoolID}/users/{userID}/password:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/UserID" }
+    post:
+      tags: [School users]
+      summary: Set a new password
+      description: Logs the user out of every device.
+      operationId: resetSchoolUserPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, minLength: 8 }
+      responses:
+        "204": { description: Password changed. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/schools/{schoolID}/drivers:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Drivers]
+      summary: List drivers
+      operationId: listDrivers
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: q, in: query, description: "Search name, mobile, licence", schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive, suspended] } }
+      responses:
+        "200":
+          description: Drivers, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Driver" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Drivers]
+      summary: Create a driver
+      description: Also creates the driver's app login (mobile + OTP). The mobile must not belong to another driver.
+      operationId: createDriver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DriverInput" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Driver" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/drivers/{driverID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: driverID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Drivers]
+      summary: Get a driver
+      operationId: getDriver
+      responses:
+        "200":
+          description: The driver.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Driver" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Drivers]
+      summary: Update a driver
+      description: Changing the mobile changes the driver's login number.
+      operationId: updateDriver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DriverInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Driver" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/drivers/{driverID}/status:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: driverID, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [Drivers]
+      summary: Change driver status
+      description: Only an active driver can log in. Inactive or suspended drivers are logged out of every device.
+      operationId: setDriverStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: { status: { type: string, enum: [active, inactive, suspended] } }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Driver" } } }
+
+  /api/v1/schools/{schoolID}/buses:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Buses]
+      summary: List buses
+      operationId: listBuses
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: q, in: query, description: "Search vehicle number, make/model", schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive, maintenance] } }
+      responses:
+        "200":
+          description: Buses, by vehicle number.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Bus" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+    post:
+      tags: [Buses]
+      summary: Create a bus
+      description: Vehicle numbers are unique per school, ignoring spaces and hyphens.
+      operationId: createBus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BusInput" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Bus" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/buses/{busID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: busID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Buses]
+      summary: Get a bus
+      operationId: getBus
+      responses:
+        "200":
+          description: The bus.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Bus" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Buses]
+      summary: Update a bus
+      operationId: updateBus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BusInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Bus" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/buses/{busID}/status:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: busID, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [Buses]
+      summary: Change bus status
+      operationId: setBusStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: { status: { type: string, enum: [active, inactive, maintenance] } }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Bus" } } }
+
+  /api/v1/schools/{schoolID}/routes:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Routes & stops]
+      summary: List routes
+      description: Without stops; each route has `stop_count`.
+      operationId: listRoutes
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: q, in: query, description: Search name or code, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+      responses:
+        "200":
+          description: Routes, by code.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Route" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+    post:
+      tags: [Routes & stops]
+      summary: Create a route
+      operationId: createRoute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RouteInput" }
+      responses:
+        "201":
+          description: Created (with an empty `stops` list).
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Route" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/routes/{routeID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+    get:
+      tags: [Routes & stops]
+      summary: Get a route with its stops in order
+      operationId: getRoute
+      responses:
+        "200":
+          description: The route; `stops` sorted by `sequence`.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Route" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Routes & stops]
+      summary: Update a route
+      operationId: updateRoute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RouteInput" }
+      responses:
+        "200":
+          description: Updated (without stops).
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Route" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/routes/{routeID}/status:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+    patch:
+      tags: [Routes & stops]
+      summary: Activate or deactivate a route
+      operationId: setRouteStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: { status: { type: string, enum: [active, inactive] } }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Route" } } }
+
+  /api/v1/schools/{schoolID}/routes/{routeID}/stops:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+    post:
+      tags: [Routes & stops]
+      summary: Add a stop
+      description: Appends to the end, or inserts at `position` and shifts later stops down.
+      operationId: createStop
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/StopInput"
+                - type: object
+                  properties:
+                    position: { type: integer, minimum: 1, description: "1-based; omit to append." }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Stop" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/routes/{routeID}/stops/order:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+    put:
+      tags: [Routes & stops]
+      summary: Reorder stops
+      description: Send every stop ID of the route, once each, in the new travel order.
+      operationId: reorderStops
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stop_ids]
+              properties:
+                stop_ids: { type: array, items: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Stops in the new order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Stop" } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/schools/{schoolID}/routes/{routeID}/stops/{stopID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+      - { name: stopID, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      tags: [Routes & stops]
+      summary: Update a stop
+      description: Position is not changed here; use the reorder endpoint.
+      operationId: updateStop
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StopInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Stop" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Routes & stops]
+      summary: Delete a stop
+      description: Later stops move up so the sequence stays 1..N.
+      operationId: deleteStop
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+
+  parameters:
+    SchoolID: { name: schoolID, in: path, required: true, schema: { type: string, format: uuid } }
+    RouteID: { name: routeID, in: path, required: true, schema: { type: string, format: uuid } }
+    UserID: { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+
   schemas:
+    DriverInput:
+      type: object
+      required: [name, mobile]
+      properties:
+        name: { type: string, maxLength: 200 }
+        mobile: { type: string, description: The driver's OTP login number. }
+        license_number: { type: string, maxLength: 30 }
+        license_expiry: { type: [string, "null"], format: date }
+        address: { type: string }
+        emergency_contact_name: { type: string }
+        emergency_contact_phone: { type: string }
+        id_proof_type: { type: string, example: Aadhaar }
+        id_proof_number: { type: string }
+        notes: { type: string }
+    Driver:
+      allOf:
+        - $ref: "#/components/schemas/DriverInput"
+        - type: object
+          required: [id, school_id, user_id, status, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            school_id: { type: string, format: uuid }
+            user_id: { type: string, format: uuid, description: The driver's login user. }
+            status: { type: string, enum: [active, inactive, suspended] }
+            last_login_at: { type: [string, "null"], format: date-time }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    BusInput:
+      type: object
+      required: [vehicle_number, capacity]
+      properties:
+        vehicle_number: { type: string, example: TN-38-AB-1234, description: Stored upper-case. }
+        capacity: { type: integer, minimum: 1, maximum: 100 }
+        make_model: { type: string }
+        gps_device_id: { type: string, description: Optional hardware tracker ID. }
+        notes: { type: string }
+    Bus:
+      allOf:
+        - $ref: "#/components/schemas/BusInput"
+        - type: object
+          required: [id, school_id, status, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            school_id: { type: string, format: uuid }
+            status: { type: string, enum: [active, inactive, maintenance] }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    RouteInput:
+      type: object
+      required: [name, code]
+      properties:
+        name: { type: string }
+        code: { type: string, example: RS-01, description: Unique per school; stored upper-case. }
+        start_point: { type: string, example: School }
+        description: { type: string }
+        supports_pickup: { type: boolean, default: true, description: Used for Morning Pickup trips. }
+        supports_drop: { type: boolean, default: true, description: Used for Evening Drop trips. }
+    Route:
+      allOf:
+        - $ref: "#/components/schemas/RouteInput"
+        - type: object
+          required: [id, school_id, status, stop_count, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            school_id: { type: string, format: uuid }
+            status: { type: string, enum: [active, inactive] }
+            stop_count: { type: integer }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+            stops:
+              type: array
+              items: { $ref: "#/components/schemas/Stop" }
+              description: Only on GET of a single route, ordered by sequence.
+    StopInput:
+      type: object
+      required: [name, latitude, longitude]
+      properties:
+        name: { type: string, example: Gandhipuram }
+        landmark: { type: string }
+        latitude: { type: number, minimum: -90, maximum: 90, example: 11.0168 }
+        longitude: { type: number, minimum: -180, maximum: 180, example: 76.9663 }
+        pickup_time:
+          type: [string, "null"]
+          pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
+          example: "07:10"
+          description: Scheduled Morning Pickup time (HH:MM).
+        drop_time:
+          type: [string, "null"]
+          pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
+          example: "16:40"
+          description: Scheduled Evening Drop time (HH:MM).
+        geofence_radius_m: { type: integer, minimum: 25, maximum: 1000, default: 100, description: Radius for Reached detection. }
+    Stop:
+      allOf:
+        - $ref: "#/components/schemas/StopInput"
+        - type: object
+          required: [id, route_id, sequence, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            route_id: { type: string, format: uuid }
+            sequence: { type: integer, minimum: 1, description: "Travel order, 1..N without gaps." }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    Role:
+      type: string
+      enum: [super_admin, school_admin, transport_manager, driver, parent]
+    User:
+      type: object
+      required: [id, school_id, role, name, email, mobile, status, totp_enabled, last_login_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        school_id: { type: [string, "null"], format: uuid, description: Null only for Super Admin. }
+        role: { $ref: "#/components/schemas/Role" }
+        name: { type: string }
+        email: { type: [string, "null"] }
+        mobile: { type: [string, "null"], example: "+919000000001" }
+        status: { type: string, enum: [active, suspended] }
+        totp_enabled: { type: boolean }
+        last_login_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UserInput:
+      type: object
+      required: [name, email]
+      properties:
+        name: { type: string, maxLength: 200 }
+        email: { type: string, format: email }
+        mobile: { type: [string, "null"] }
+    Tokens:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, user]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: Access token lifetime in seconds. }
+        user: { $ref: "#/components/schemas/User" }
+      example:
+        access_token: eyJhbGciOiJIUzI1NiIs...
+        refresh_token: 3q2-7wEXAMPLE...
+        token_type: Bearer
+        expires_in: 900
+        user:
+          id: 9b6c1c2e-0000-4000-8000-000000000001
+          school_id: 4f1d2a3b-0000-4000-8000-000000000002
+          role: driver
+          name: Kumar
+          email: null
+          mobile: "+919000000001"
+          status: active
+          totp_enabled: false
+          last_login_at: "2026-10-07T01:30:00Z"
+          created_at: "2026-10-01T09:00:00Z"
+          updated_at: "2026-10-01T09:00:00Z"
+    LoginResult:
+      description: Either `mfa_required` is true with an `mfa_token`, or the token fields are present.
+      allOf:
+        - type: object
+          required: [mfa_required]
+          properties:
+            mfa_required: { type: boolean }
+            mfa_token: { type: string }
+        - type: object
+          properties:
+            access_token: { type: string }
+            refresh_token: { type: string }
+            token_type: { type: string }
+            expires_in: { type: integer }
+            user: { $ref: "#/components/schemas/User" }
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_name: { type: string }
+        user_agent: { type: string }
+        ip: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        current: { type: boolean, description: True for the session making this request. }
+    School:
+      allOf:
+        - $ref: "#/components/schemas/SchoolInput"
+        - type: object
+          required: [id, status, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [active, inactive] }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    SchoolInput:
+      type: object
+      required: [name, code]
+      properties:
+        name: { type: string, maxLength: 200 }
+        code: { type: string, pattern: "^[A-Za-z0-9-]{2,20}$", description: Unique; stored upper-case. }
+        address: { type: string }
+        city: { type: string }
+        state: { type: string }
+        pincode: { type: string, pattern: "^\\d{6}$" }
+        contact_name: { type: string }
+        contact_phone: { type: string }
+        contact_email: { type: string }
+        working_days:
+          type: array
+          items: { type: string, enum: [mon, tue, wed, thu, fri, sat, sun] }
+          default: [mon, tue, wed, thu, fri]
+        timezone: { type: string, default: Asia/Kolkata }
+        transport_config: { type: object, description: Free-form settings; structure defined in later sprints. }
     Error:
       type: object
       required: [error]
@@ -61,51 +1212,64 @@ components:
           type: object
           required: [code, message]
           properties:
-            code:
-              type: string
-              description: Stable machine-readable code, e.g. `validation_failed`, `not_found`, `unauthorized`.
-            message:
-              type: string
-              description: Human-readable message, safe to show to users.
+            code: { type: string }
+            message: { type: string }
             fields:
               type: object
               additionalProperties: { type: string }
-              description: Present on `validation_failed`; maps field name to reason.
-      example:
-        error:
-          code: validation_failed
-          message: One or more fields are invalid.
-          fields: { mobile: must be a 10-digit number }
     PageMeta:
       type: object
       required: [page, page_size, total]
       properties:
-        page: { type: integer, minimum: 1 }
-        page_size: { type: integer, minimum: 1, maximum: 100 }
-        total: { type: integer, minimum: 0 }
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
     Health:
       type: object
       required: [status, checks]
       properties:
-        status:
-          type: string
-          enum: [ok, degraded]
+        status: { type: string, enum: [ok, degraded] }
         checks:
           type: object
-          additionalProperties:
-            type: string
-            enum: [up, down]
+          additionalProperties: { type: string, enum: [up, down] }
     HealthEnvelope:
       type: object
-      required: [data]
       properties:
-        data:
-          $ref: "#/components/schemas/Health"
+        data: { $ref: "#/components/schemas/Health" }
+
   responses:
-    NotFound:
-      description: Resource does not exist or is outside your school.
+    ValidationFailed:
+      description: Invalid input.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
-security:
-  - bearerAuth: []
+          example: { error: { code: validation_failed, message: One or more fields are invalid., fields: { mobile: must be a valid 10-digit mobile number } } }
+    Unauthorized:
+      description: Not logged in, bad credentials, or session ended.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: otp_invalid, message: The code is incorrect or has expired. } }
+    Forbidden:
+      description: Role not allowed, account suspended, or school inactive.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: account_suspended, message: Your account is suspended. Contact your school. } }
+    NotFound:
+      description: Missing, or belongs to another school.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Duplicate value.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: conflict, message: A record with this email already exists., fields: { email: already exists } } }
+    TooManyRequests:
+      description: Rate limited.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: otp_too_soon, message: Please wait 30 seconds before requesting another code. } }

@@ -20,14 +20,36 @@ type Config struct {
 	CORSOrigins     []string
 	ShutdownTimeout time.Duration
 	LogLevel        string
+
+	JWTSecret            string
+	AccessTokenTTL       time.Duration
+	RefreshTokenTTL      time.Duration
+	OTPTTL               time.Duration
+	OTPDevCode           string // fixed OTP for dev/testing; refused in production
+	RequireSuperAdmin2FA bool
 }
 
 func Load() (*Config, error) {
 	_ = godotenv.Load() // optional; real env vars take precedence
 
-	shutdown, err := time.ParseDuration(get("SHUTDOWN_TIMEOUT", "10s"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid SHUTDOWN_TIMEOUT: %w", err)
+	var errs []string
+	duration := func(key, fallback string) time.Duration {
+		d, err := time.ParseDuration(get(key, fallback))
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("invalid %s: %v", key, err))
+		}
+		return d
+	}
+	boolean := func(key string, fallback bool) bool {
+		v, ok := os.LookupEnv(key)
+		if !ok || v == "" {
+			return fallback
+		}
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("invalid %s: %v", key, err))
+		}
+		return b
 	}
 
 	cfg := &Config{
@@ -36,17 +58,41 @@ func Load() (*Config, error) {
 		DatabaseURL:     get("DATABASE_URL", ""),
 		RedisURL:        get("REDIS_URL", "redis://localhost:6379/0"),
 		CORSOrigins:     splitCSV(get("CORS_ORIGINS", "http://localhost:5180")),
-		ShutdownTimeout: shutdown,
+		ShutdownTimeout: duration("SHUTDOWN_TIMEOUT", "10s"),
 		LogLevel:        get("LOG_LEVEL", "info"),
+
+		JWTSecret:            get("JWT_SECRET", ""),
+		AccessTokenTTL:       duration("ACCESS_TOKEN_TTL", "15m"),
+		RefreshTokenTTL:      duration("REFRESH_TOKEN_TTL", "720h"),
+		OTPTTL:               duration("OTP_TTL", "5m"),
+		OTPDevCode:           get("OTP_DEV_CODE", ""),
+		RequireSuperAdmin2FA: boolean("REQUIRE_SUPER_ADMIN_2FA", true),
 	}
 
 	if cfg.DatabaseURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL is required")
+		errs = append(errs, "DATABASE_URL is required")
 	}
 	if _, err := strconv.Atoi(strings.TrimPrefix(cfg.HTTPAddr, ":")); err != nil {
-		return nil, fmt.Errorf("invalid PORT: %w", err)
+		errs = append(errs, fmt.Sprintf("invalid PORT: %v", err))
+	}
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("config: %s", strings.Join(errs, "; "))
 	}
 	return cfg, nil
+}
+
+// ValidateForAPI checks the settings only the API server needs (not migrate/seed).
+func (c *Config) ValidateForAPI() error {
+	if len(c.JWTSecret) < 32 {
+		return fmt.Errorf("config: JWT_SECRET must be at least 32 characters")
+	}
+	if c.IsProduction() && c.OTPDevCode != "" {
+		return fmt.Errorf("config: OTP_DEV_CODE must not be set in production")
+	}
+	if c.IsProduction() && !c.RequireSuperAdmin2FA {
+		return fmt.Errorf("config: REQUIRE_SUPER_ADMIN_2FA cannot be disabled in production")
+	}
+	return nil
 }
 
 func (c *Config) IsProduction() bool { return c.Env == "production" }

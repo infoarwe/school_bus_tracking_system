@@ -34,7 +34,7 @@ Chosen:
 Not yet decided (fill in when chosen):
 - Android language/framework: owned by the mobile team (not in this repo)
 - OTP/SMS provider: `TODO` (needed in Sprint 1, S1-03; stub until chosen)
-- Maps/routing provider: `TODO` (needed in Sprint 2, S2-11)
+- Maps/routing provider: `TODO` for ETA routing (Sprint 6). Admin maps use Leaflet + OpenStreetMap tiles (free, no key); swap the tile URL in `frontend/src/components/RouteMap.tsx` for a paid provider before production traffic (OSM tile usage policy).
 - Hosting/deployment: `TODO`
 
 ## Repository layout
@@ -56,8 +56,10 @@ Local ports: API **8085**, web **5180**, Postgres **5433** (host), Redis **6379*
 docker compose up -d                       # Postgres + Redis
 cd backend && cp .env.example .env         # first time only
 go run ./cmd/migrate up                    # also: down, status, redo
+go run ./cmd/seed                          # demo schools + users (idempotent; refuses in production)
 go run ./cmd/api                           # http://localhost:8085/health, API docs at /docs
-go test ./... && go vet ./...
+go vet ./... && go test ./...              # integration tests skip unless TEST_DATABASE_URL is set:
+TEST_DATABASE_URL='postgres://sbts:sbts@localhost:5433/sbts_test?sslmode=disable' go test -p 1 ./...
 cd frontend && npm install && npm run dev  # http://localhost:5180 (proxies /api, /health)
 npm run lint && npm run format:check && npm run build
 ```
@@ -244,6 +246,23 @@ Advanced analytics, attendance automation and additional integrations. Do not bu
 - Status codes: 400 validation, 401 unauthenticated, 403 wrong role/school, 404 not found **or out of tenant scope** (never reveal another school's records exist), 409 conflict, 429 rate limited, 500 unexpected.
 - Auth (from Sprint 1): `Authorization: Bearer <access token>`.
 - Every request gets an `X-Request-ID`; include it in logs.
+
+### Auth and tenant scoping (how rules 1 and 2 are implemented)
+
+- School-owned admin resources live under `/api/v1/schools/{schoolID}/...`. The `SchoolScope` middleware lets a non-Super-Admin reach only their own school (others get 404). Handlers take the school ID from the URL (already checked), never from the request body, and every store query filters by it.
+- Driver/Parent app endpoints (from Sprint 3) are caller-scoped instead (e.g. `/api/v1/driver/trips`): the school and user come from the token's principal.
+- `middleware.Authenticate` re-loads session, user status and school status from the DB on every request; role and school come from the DB, not the JWT. `RequireRoles(...)` guards each route.
+- Audit: write through `a.audit(ctx, q, r, store.AuditEntry{...})` inside the same transaction as the change.
+- Sessions: 15 min JWT access token + 30 day opaque refresh token (stored hashed, rotated on every refresh).
+- Integration tests in `internal/router/router_test.go` cover isolation and permissions; add a case there for every new school-scoped resource.
+
+### Domain implementation notes
+
+- A driver is a `drivers` row plus a `users` row (role `driver`) that holds name + mobile for OTP login; create/update both in one transaction. Only an `active` driver can log in: setting `inactive`/`suspended` suspends the user and revokes sessions.
+- Driver mobiles are unique per role across all schools (one login identity per number).
+- Bus `vehicle_number` is unique per school ignoring spaces/hyphens/case.
+- Stops: `sequence` is always 1..N with no gaps (insert at position, delete renumbers, reorder takes the full ID list). Always call `store.LockRoute` first in the transaction. Geofence radius 25-1000 m, default 100.
+- Drivers, buses and routes are deactivated, never deleted (trip history references them). Stops can be deleted until Sprint 3 links students to them.
 
 ### Backend
 

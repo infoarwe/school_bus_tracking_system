@@ -21,6 +21,7 @@ docker compose up -d
 cd backend
 cp .env.example .env
 go run ./cmd/migrate up
+go run ./cmd/seed        # demo data, safe to re-run
 go run ./cmd/api
 
 # 3. Frontend: http://localhost:5180 (proxies /api and /health to the backend)
@@ -33,12 +34,25 @@ API docs (for the mobile team): http://localhost:8085/docs
 
 Check: `curl http://localhost:8085/health` returns `{"data":{"status":"ok","checks":{"postgres":"up","redis":"up"}}}`.
 
+## Demo accounts (from `go run ./cmd/seed`)
+
+| Who | Login |
+|---|---|
+| Super Admin | `superadmin@sbts.local` / `Admin@12345` |
+| School Admin (Demo Public School) | `admin@demo.local` / `Admin@12345` |
+| Transport Manager (Demo Public School) | `transport@demo.local` / `Admin@12345` |
+| School Admin (Second Demo School) | `admin@demo2.local` / `Admin@12345` |
+| Driver app | mobile `9000000001`, OTP `123456` |
+| Parent app | mobile `9000000002`, OTP `123456` |
+
+OTP `123456` works only while `OTP_DEV_CODE` is set (never in production). With `REQUIRE_SUPER_ADMIN_2FA=true` the Super Admin must set up an authenticator app at first login.
+
 ## Common commands
 
 | Task | Backend (`backend/`) | Frontend (`frontend/`) |
 |---|---|---|
 | Run | `go run ./cmd/api` | `npm run dev` |
-| Test | `go test ./...` | — |
+| Test | `go test ./...` (set `TEST_DATABASE_URL` for integration tests, see CLAUDE.md) | — |
 | Lint | `go vet ./...` (+ `golangci-lint run` if installed) | `npm run lint` |
 | Format | `gofmt -w .` | `npm run format` |
 | Build | `go build ./...` | `npm run build` |
