@@ -161,10 +161,14 @@ func (a *API) changeTripStatus(ctx context.Context, q store.DBTX, r *http.Reques
 	})
 }
 
-// publishTripStatus tells live subscribers (after the change is committed). A failure
-// only delays the live view, so it is logged, not returned.
+// publishTripStatus tells live subscribers and notifies parents (Bus Started, Trip
+// Completed, Trip Cancelled), after the change is committed. A failure here only
+// delays the live view or a push, so it is logged, not returned.
 func (a *API) publishTripStatus(r *http.Request, t *models.Trip) {
 	if err := a.Live.TripStatusChanged(r.Context(), t.SchoolID, t.ID, t.Status); err != nil {
+		internalErrorLog(r, err)
+	}
+	if err := a.notifyTripStatus(r.Context(), t); err != nil {
 		internalErrorLog(r, err)
 	}
 }

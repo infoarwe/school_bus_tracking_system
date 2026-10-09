@@ -2,9 +2,12 @@ import { createBrowserRouter } from 'react-router-dom'
 import AdminLayout from '../layouts/AdminLayout'
 import ComingSoon from '../components/ComingSoon'
 import AccountPage from '../pages/AccountPage'
+import AlertsPage from '../pages/AlertsPage'
+import AnnouncementsPage from '../pages/AnnouncementsPage'
 import BusesPage from '../pages/BusesPage'
 import DashboardPage from '../pages/DashboardPage'
 import DriversPage from '../pages/DriversPage'
+import ErrorPage from '../pages/ErrorPage'
 import LiveTrackingPage from '../pages/LiveTrackingPage'
 import LoginPage from '../pages/LoginPage'
 import NotFoundPage from '../pages/NotFoundPage'
@@ -34,6 +37,8 @@ const pages: Record<string, React.ReactNode> = {
   '/settings': <SettingsPage />,
   '/trips': <TripsPage />,
   '/live': <LiveTrackingPage />,
+  '/alerts': <AlertsPage />,
+  '/announcements': <AnnouncementsPage />,
 }
 
 const menuRoutes = menu.map((m) => {
@@ -62,6 +67,7 @@ export const router = createBrowserRouter([
         <AdminLayout />
       </RequireAuth>
     ),
+    errorElement: <ErrorPage />,
     children: [
       ...menuRoutes,
       {

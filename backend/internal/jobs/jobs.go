@@ -45,6 +45,15 @@ func LocationRetention(ctx context.Context, st *store.Store, every time.Duration
 	})
 }
 
+// Announcements sends scheduled announcements when they are due.
+func Announcements(ctx context.Context, every time.Duration, sendDue func(context.Context) error) {
+	tick(ctx, every, func() {
+		if err := sendDue(ctx); err != nil {
+			slog.Error("announcements", "err", err)
+		}
+	})
+}
+
 func tick(ctx context.Context, every time.Duration, fn func()) {
 	t := time.NewTicker(every)
 	defer t.Stop()

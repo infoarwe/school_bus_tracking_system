@@ -61,7 +61,11 @@ const (
 	EventBusStale   = "bus_stale"
 	EventStopStatus = "stop_status" // a stop became approaching / reached / crossed
 	EventProgress   = "progress"    // every stop's status and ETA, after each location
+	EventAlert      = "alert"       // delay / emergency, staff only
 )
+
+// AudienceStaff marks events only school staff (school-channel subscribers) may receive.
+const AudienceStaff = "staff"
 
 type Event struct {
 	Type     string        `json:"type"`
@@ -71,6 +75,8 @@ type Event struct {
 	Status   string        `json:"status,omitempty"` // trip_status
 	Stop     *StopEvent    `json:"stop,omitempty"`   // stop_status
 	Progress *TripProgress `json:"progress,omitempty"`
+	Alert    any           `json:"alert,omitempty"`
+	Audience string        `json:"audience,omitempty"` // "staff": never sent to parents or drivers
 }
 
 // Live reads and writes live positions in Redis and publishes events.
@@ -277,4 +283,13 @@ func (l *Live) getJSON(ctx context.Context, key string, dst any) (bool, error) {
 		return false, fmt.Errorf("redis get %s: %w", key, err)
 	}
 	return true, json.Unmarshal(raw, dst)
+}
+
+// PublishAlert sends a delay or emergency to the school's staff.
+func (l *Live) PublishAlert(ctx context.Context, schoolID, tripID string, alert any) error {
+	ev, err := json.Marshal(Event{Type: EventAlert, SchoolID: schoolID, TripID: tripID, Alert: alert, Audience: AudienceStaff})
+	if err != nil {
+		return err
+	}
+	return l.rdb.Publish(ctx, eventsKey(schoolID), ev).Err()
 }

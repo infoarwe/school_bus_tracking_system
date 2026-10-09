@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import {
   Alert,
   App,
@@ -9,20 +9,17 @@ import {
   Form,
   Input,
   InputNumber,
-  Skeleton,
   Typography,
 } from 'antd'
+import LoadingOrError from '../components/LoadingOrError'
 import PageHeader from '../components/PageHeader'
+import PushSettingsCard from '../components/PushSettingsCard'
 import RequireSchool from '../components/RequireSchool'
 import RouteMap from '../components/RouteMap'
+import { useLoad } from '../hooks/useLoad'
 import { setCachedMapsKey } from '../hooks/useSchoolMapsKey'
-import {
-  settingsApi,
-  trackingSettingsApi,
-  type MapsSettings,
-  type TrackingSettings,
-} from '../services/settings'
-import { applyApiErrors, errorMessage } from '../utils/formErrors'
+import { settingsApi, trackingSettingsApi, type TrackingSettings } from '../services/settings'
+import { applyApiErrors } from '../utils/formErrors'
 
 // School settings. Sprint 8 adds geofence defaults, retention and more; maps keys come first
 // because every school uses its own Google Maps keys.
@@ -34,6 +31,7 @@ export default function SettingsPage() {
           <PageHeader title="Settings" subtitle={schoolName} />
           <MapsSettingsCard schoolId={schoolId} />
           <TrackingSettingsCard schoolId={schoolId} />
+          <PushSettingsCard schoolId={schoolId} />
         </Flex>
       )}
     </RequireSchool>
@@ -49,16 +47,10 @@ interface Values {
 function MapsSettingsCard({ schoolId }: { schoolId: string }) {
   const { message } = App.useApp()
   const [form] = Form.useForm<Values>()
-  const [current, setCurrent] = useState<MapsSettings | null>(null)
+  const loadMaps = useCallback(() => settingsApi.getMaps(schoolId), [schoolId])
+  const { data: current, setData: setCurrent, error: loadError, retry } = useLoad(loadMaps)
   const [saving, setSaving] = useState(false)
   const removeServerKey = Form.useWatch('remove_server_key', form)
-
-  useEffect(() => {
-    settingsApi
-      .getMaps(schoolId)
-      .then(setCurrent)
-      .catch((e: unknown) => message.error(errorMessage(e)))
-  }, [schoolId, message])
 
   async function save(v: Values) {
     setSaving(true)
@@ -83,7 +75,7 @@ function MapsSettingsCard({ schoolId }: { schoolId: string }) {
   return (
     <Card title="Google Maps">
       {!current ? (
-        <Skeleton active />
+        <LoadingOrError error={loadError} onRetry={retry} />
       ) : (
         <Form
           form={form}
@@ -153,17 +145,11 @@ function MapsSettingsCard({ schoolId }: { schoolId: string }) {
 function TrackingSettingsCard({ schoolId }: { schoolId: string }) {
   const { message } = App.useApp()
   const [form] = Form.useForm<TrackingSettings>()
-  const [current, setCurrent] = useState<TrackingSettings | null>(null)
+  const loadTracking = useCallback(() => trackingSettingsApi.get(schoolId), [schoolId])
+  const { data: current, setData: setCurrent, error: loadError, retry } = useLoad(loadTracking)
   const [saving, setSaving] = useState(false)
   const schoolLat = Form.useWatch('school_latitude', form)
   const schoolLng = Form.useWatch('school_longitude', form)
-
-  useEffect(() => {
-    trackingSettingsApi
-      .get(schoolId)
-      .then(setCurrent)
-      .catch((e: unknown) => message.error(errorMessage(e)))
-  }, [schoolId, message])
 
   async function save(v: TrackingSettings) {
     setSaving(true)
@@ -187,7 +173,7 @@ function TrackingSettingsCard({ schoolId }: { schoolId: string }) {
   return (
     <Card title="Live tracking">
       {!current ? (
-        <Skeleton active />
+        <LoadingOrError error={loadError} onRetry={retry} />
       ) : (
         <Form
           form={form}

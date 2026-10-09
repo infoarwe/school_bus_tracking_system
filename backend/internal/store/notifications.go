@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"time"
 )
 
@@ -160,6 +161,7 @@ func InsertDeliveries(ctx context.Context, q DBTX, notificationID string, ds []D
 // Delivery is a queued push.
 type Delivery struct {
 	ID       int64
+	SchoolID string // whose Firebase project sends it
 	Token    string
 	Title    string
 	Body     string
@@ -173,8 +175,9 @@ func ClaimDeliveries(ctx context.Context, q DBTX, limit int) ([]Delivery, error)
 	rows, err := q.Query(ctx, `
 		UPDATE push_deliveries SET next_attempt_at = now() + interval '1 minute'
 		WHERE id IN (SELECT id FROM push_deliveries WHERE status = 'pending' AND next_attempt_at <= now()
-			ORDER BY next_attempt_at LIMIT $1 FOR UPDATE SKIP LOCKED)
-		RETURNING id, token, title, body, data, attempts`, limit)
+			ORDER BY next_attempt_at, id LIMIT $1 FOR UPDATE SKIP LOCKED) -- id: creation order within a request
+		RETURNING id, token, title, body, data, attempts,
+			(SELECT n.school_id FROM notifications n WHERE n.id = push_deliveries.notification_id)`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -183,12 +186,15 @@ func ClaimDeliveries(ctx context.Context, q DBTX, limit int) ([]Delivery, error)
 	for rows.Next() {
 		var d Delivery
 		var data []byte
-		if err := rows.Scan(&d.ID, &d.Token, &d.Title, &d.Body, &data, &d.Attempts); err != nil {
+		if err := rows.Scan(&d.ID, &d.Token, &d.Title, &d.Body, &data, &d.Attempts, &d.SchoolID); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(data, &d.Data)
 		out = append(out, d)
 	}
+	// UPDATE ... RETURNING does not keep the subquery's order: send oldest first so a
+	// parent never gets "reached" before "approaching".
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, rows.Err()
 }
 

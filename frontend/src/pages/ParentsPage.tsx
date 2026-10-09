@@ -80,6 +80,8 @@ function Parents({ schoolId }: { schoolId: string }) {
         onStatus={(status) => list.update({ status })}
       />
       <Table<Parent>
+        // A parent's "children" are students, not nested table rows: turn off antd tree data.
+        expandable={{ childrenColumnName: '__no_tree_rows' }}
         rowKey="id"
         loading={list.loading}
         dataSource={list.rows}
@@ -91,8 +93,8 @@ function Parents({ schoolId }: { schoolId: string }) {
           {
             title: 'Children',
             dataIndex: 'children',
-            render: (children: ChildLink[]) =>
-              children.length === 0 ? (
+            render: (children: ChildLink[] | undefined) =>
+              !children?.length ? (
                 <Tag color="red">None linked</Tag>
               ) : (
                 <Space size={4} wrap>

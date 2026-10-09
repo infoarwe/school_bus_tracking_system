@@ -19,6 +19,7 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/database"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/handlers"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/jobs"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/notify"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/router"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
@@ -72,25 +73,47 @@ func run() error {
 	go jobs.StaleSweep(ctx, st, live, 30*time.Second)
 	go jobs.LocationRetention(ctx, st, time.Hour)
 
+	// Fallback for schools that have not uploaded their own Firebase key.
+	var fallback notify.Sender = notify.LogSender{}
+	if cfg.FCMCredentialsFile != "" {
+		fcm, err := notify.NewFCMSender(ctx, cfg.FCMCredentialsFile)
+		if err != nil {
+			return err
+		}
+		fallback = fcm
+		slog.Info("server-wide Firebase key loaded (used by schools without their own)", "credentials", cfg.FCMCredentialsFile)
+	} else {
+		slog.Info("no server-wide Firebase key: schools without their own key (Settings → Push) only log pushes")
+	}
+	worker := &notify.Worker{Store: st, Senders: &notify.SchoolSenders{
+		Store: st, Secrets: box, Fallback: fallback,
+		NewSender: func(ctx context.Context, raw []byte) (notify.Sender, error) { return notify.NewFCMSenderJSON(ctx, raw) },
+	}}
+	go worker.Run(ctx, 2*time.Second)
+
+	api := &handlers.API{
+		Store:                st,
+		Tokens:               auth.NewTokenManager(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL),
+		SMS:                  auth.LogSender{}, // TODO(S0-03): real SMS provider
+		Secrets:              box,
+		Live:                 live,
+		Hub:                  hub,
+		ETA:                  tracking.NewGoogleRoutes(),
+		CheckPushKey:         handlers.CheckFCMKey,
+		WSOriginPatterns:     originHosts(cfg.CORSOrigins),
+		OTPTTL:               cfg.OTPTTL,
+		OTPDevCode:           cfg.OTPDevCode,
+		RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
+	}
+	go jobs.Announcements(ctx, 30*time.Second, api.SendDueAnnouncements)
+
 	handler := router.New(router.Deps{
 		CORSOrigins: cfg.CORSOrigins,
 		Health: &handlers.HealthHandler{Checks: map[string]handlers.Pinger{
 			"postgres": db.Ping,
 			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		}},
-		API: &handlers.API{
-			Store:                st,
-			Tokens:               auth.NewTokenManager(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL),
-			SMS:                  auth.LogSender{}, // TODO(S0-03): real SMS provider
-			Secrets:              box,
-			Live:                 live,
-			Hub:                  hub,
-			ETA:                  tracking.NewGoogleRoutes(),
-			WSOriginPatterns:     originHosts(cfg.CORSOrigins),
-			OTPTTL:               cfg.OTPTTL,
-			OTPDevCode:           cfg.OTPDevCode,
-			RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
-		},
+		API:                  api,
 		RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
 	})
 

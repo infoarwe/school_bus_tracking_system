@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.7.0
+  version: 0.8.1
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -83,6 +83,26 @@ info:
       when a stop changes, and `{"type":"progress","trip_id":"…","progress":TripProgress}` after every location.
       Example display: `Bus: TN-38-AB-1234 | Status: Moving | ETA: 8 minutes | Distance: 2.4 km`.
 
+    ## Push notifications (FCM)
+    - **Each school has its own branded apps and its own Firebase project.** Build each school's app with
+      that school's `google-services.json`; the school uploads the matching service-account key in the admin web
+      (Settings → Push notifications), and the server sends that school's pushes through it.
+    - After login, and whenever FCM issues a new token, call `POST /devices` with `{token, platform}`. The device
+      is tied to that login: after logout or suspension it receives nothing. `POST /devices/unregister` removes it.
+    - Pushes are FCM messages with `notification` (title, body) and `data`. Android: channel `bus_updates`, high
+      priority. Every push has `data.type` and `data.notification_id`; trip pushes add `trip_id`, `route_id`,
+      `trip_type`, stop pushes add `stop_id`, child-specific pushes add `student_ids` (comma-separated: open that
+      child; with several, the title starts with their names, e.g. `Asha, Arjun · Bus approaching`).
+    - `data.type` values: `bus_started`, `bus_approaching`, `bus_reached`, `bus_crossed`, `bus_delayed`,
+      `bus_breakdown`, `school_reached`, `trip_completed`, `trip_cancelled`, `announcement` (adds `announcement_id`,
+      `category` and optionally `attachment_url`).
+    - Parents receive stop pushes only for their own child's stop, and each event at most once.
+    - The inbox (`GET /parent/notifications`) holds the same items; mark them read with
+      `POST /parent/notifications/read`. `meta.unread` is the badge count.
+    - **Driver app:** report a delay or breakdown with `POST /driver/trips/{id}/delays` (parents of the trip are
+      notified), and an emergency with `POST /driver/trips/{id}/emergency` (the school's staff are alerted at once;
+      parents are not notified automatically).
+
     ## Error codes you should handle
     | Code | Status | Meaning |
     |---|---|---|
@@ -102,6 +122,9 @@ info:
     | `live_unavailable` | 503 | Keep GPS points queued and retry. |
 
     ## Changelog
+    - 0.8.1: per-school Firebase key (Settings → Push notifications); each school's apps use their own Firebase project.
+    - 0.8.0 (Sprint 7): **mobile handoff 6**: `POST /devices`, push payloads (see Push notifications), parent inbox,
+      `POST /driver/trips/{id}/delays`, `POST /driver/trips/{id}/emergency`. Admin: alerts, announcements.
     - 0.7.0 (Sprint 6): **mobile handoff 5**: `GET /parent/children/{id}/live`; WebSocket `stop_status` and `progress` events;
       `GET /driver/trips/{id}/progress`. Admin: trip progress, approach distance and school location in tracking settings.
     - 0.6.0 (Sprint 5): **mobile handoff 4**: `POST /driver/trips/{id}/locations`, WebSocket `/api/v1/ws` (see Live tracking).
@@ -137,6 +160,10 @@ tags:
     description: Daily assignments (Driver + Bus + Route + Date + Trip Type).
   - name: Live tracking
     description: Current bus positions and the WebSocket.
+  - name: Notifications
+  - name: Alerts
+    description: Delays, breakdowns and emergencies.
+  - name: Announcements
   - name: Settings
   - name: System
 security:
@@ -2029,6 +2056,350 @@ paths:
               schema: { type: object, properties: { data: { $ref: "#/components/schemas/TripProgressResponse" } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/devices:
+    post:
+      tags: [Notifications]
+      summary: Register this device for push (Driver / Parent app)
+      operationId: registerDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, platform]
+              properties:
+                token: { type: string, description: FCM registration token. }
+                platform: { type: string, enum: [android, ios] }
+      responses:
+        "204": { description: Registered for the current login session. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/devices/unregister:
+    post:
+      tags: [Notifications]
+      summary: Stop push to this device
+      operationId: unregisterDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [token], properties: { token: { type: string } } }
+      responses:
+        "204": { description: Removed. }
+
+  /api/v1/parent/notifications:
+    get:
+      tags: [Parent app]
+      summary: Notification inbox
+      description: Newest first. With `student_id`, that child's notifications plus the ones about no particular child.
+      operationId: listParentNotifications
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: student_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Inbox items; `meta.unread` is the unread count for the same filter.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/InboxItem" } }
+                  meta:
+                    allOf:
+                      - $ref: "#/components/schemas/PageMeta"
+                      - type: object
+                        properties: { unread: { type: integer } }
+              example:
+                data:
+                  - id: 2b000000-0000-4000-8000-000000000090
+                    type: bus_approaching
+                    title: Bus approaching
+                    body: "Bus is approaching your stop. Estimated arrival: 8 minutes."
+                    data: { type: bus_approaching, trip_id: 8a000000-0000-4000-8000-000000000060, stop_id: 6f000000-0000-4000-8000-000000000050 }
+                    student_id: 7a2b0000-0000-4000-8000-000000000020
+                    student_name: Asha Ravi
+                    read_at: null
+                    created_at: "2026-10-07T01:47:00Z"
+                meta: { page: 1, page_size: 20, total: 1, unread: 1 }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/parent/notifications/read:
+    post:
+      tags: [Parent app]
+      summary: Mark inbox items read
+      operationId: markParentNotificationsRead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties: { ids: { type: array, minItems: 1, maxItems: 200, items: { type: string, format: uuid } } }
+      responses:
+        "204": { description: Marked (IDs that are not the caller's are ignored). }
+
+  /api/v1/driver/trips/{tripID}/delays:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Driver app]
+      summary: Report a delay or breakdown
+      description: Parents of the students on this trip are notified (breakdown uses the breakdown message). Staff see it live.
+      operationId: reportDriverDelay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DelayInput" }
+            example: { minutes: 15, reason: traffic, note: Signal not working at Gandhipuram }
+      responses:
+        "201":
+          description: Recorded.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Alert" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/driver/trips/{tripID}/emergency:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Driver app]
+      summary: Report an emergency
+      description: Alerts the school's staff immediately. Send the current position if available.
+      operationId: reportDriverEmergency
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: { type: string, maxLength: 1000 }
+                latitude: { type: [number, "null"] }
+                longitude: { type: [number, "null"] }
+      responses:
+        "201":
+          description: Recorded and sent to staff.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Alert" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/delays:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Alerts]
+      summary: Report a delay on a trip (staff)
+      operationId: reportStaffDelay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DelayInput" }
+      responses:
+        "201":
+          description: Recorded; parents notified.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Alert" } } }
+
+  /api/v1/schools/{schoolID}/alerts:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Alerts]
+      summary: Unresolved emergencies and today's delays
+      description: Also pushed live to staff as WebSocket `alert` events (school channel).
+      operationId: listAlerts
+      responses:
+        "200":
+          description: Newest first.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Alert" } } } }
+
+  /api/v1/schools/{schoolID}/emergencies/{emergencyID}/acknowledge:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: emergencyID, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Alerts]
+      summary: Acknowledge an emergency
+      operationId: acknowledgeEmergency
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Alert" } } }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/emergencies/{emergencyID}/resolve:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: emergencyID, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Alerts]
+      summary: Resolve an emergency
+      operationId: resolveEmergency
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Alert" } } }
+
+  /api/v1/schools/{schoolID}/announcements:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Announcements]
+      summary: Announcement history and scheduled ones, with delivery stats
+      operationId: listAnnouncements
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: status, in: query, schema: { type: string, enum: [scheduled, sent, cancelled] } }
+      responses:
+        "200":
+          description: Newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Announcement" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+    post:
+      tags: [Announcements]
+      summary: Send or schedule an announcement
+      description: |
+        `target: school` (all parents; Super Admin and School Admin only) or `target: route` with `route_id` (parents of
+        that route's students; Transport Managers too). Without `scheduled_at` it is sent at once.
+      operationId: createAnnouncement
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, target, title, message]
+              properties:
+                category: { type: string, enum: [school_announcement, route_announcement, bus_breakdown, traffic_delay, pickup_change, emergency_message, holiday, other] }
+                target: { type: string, enum: [school, route] }
+                route_id: { type: [string, "null"], format: uuid }
+                title: { type: string, maxLength: 100 }
+                message: { type: string, maxLength: 1000 }
+                attachment_url: { type: string, description: Optional link to a document or image. }
+                scheduled_at: { type: [string, "null"], format: date-time }
+      responses:
+        "201":
+          description: Created (and sent, unless scheduled).
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Announcement" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/schools/{schoolID}/announcements/{announcementID}/cancel:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: announcementID, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Announcements]
+      summary: Cancel a scheduled announcement
+      operationId: cancelAnnouncement
+      responses:
+        "200":
+          description: Cancelled.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Announcement" } } }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/settings/push:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Settings]
+      summary: The school's Firebase project for push (Super Admin, School Admin)
+      description: The key itself is never returned.
+      operationId: getPushSettings
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/PushSettings" } } }
+    put:
+      tags: [Settings]
+      summary: Upload the school's Firebase service-account key
+      description: |
+        The contents of the .json key from Firebase (Project settings → Service accounts → Generate new private key).
+        Validated, then stored encrypted. Replaces any previous key.
+      operationId: updatePushSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [service_account_json]
+              properties:
+                service_account_json: { type: string, maxLength: 16384, description: The key file's contents. }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/PushSettings" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      tags: [Settings]
+      summary: Remove the school's Firebase key
+      operationId: deletePushSettings
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/PushSettings" } } }
+
+  /api/v1/schools/{schoolID}/settings/push/test:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    post:
+      tags: [Settings]
+      summary: Check the stored key with Google
+      operationId: testPushSettings
+      responses:
+        "200":
+          description: "`ok` says whether Google accepted the key."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      ok: { type: boolean }
+                      message: { type: string }
+        "409":
+          description: "`push_not_configured`: no key uploaded."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2046,6 +2417,82 @@ components:
     PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
 
   schemas:
+    PushSettings:
+      type: object
+      properties:
+        configured: { type: boolean }
+        project_id: { type: string }
+        client_email: { type: string }
+        updated_at: { type: [string, "null"], format: date-time }
+    InboxItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: Inbox item ID (use to mark read). }
+        type: { type: string }
+        title: { type: string }
+        body: { type: string }
+        data: { type: object, additionalProperties: { type: string } }
+        student_id: { type: [string, "null"], format: uuid, description: Null when not about one child. }
+        student_name: { type: [string, "null"] }
+        read_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+    DelayInput:
+      type: object
+      required: [minutes, reason]
+      properties:
+        minutes: { type: integer, minimum: 1, maximum: 240 }
+        reason: { type: string, enum: [traffic, bus_breakdown, road_block, weather, driver_issue, other] }
+        note: { type: string, maxLength: 500 }
+    Alert:
+      type: object
+      description: A delay report or an emergency.
+      properties:
+        kind: { type: string, enum: [delay, emergency] }
+        id: { type: string, format: uuid }
+        trip_id: { type: string, format: uuid }
+        trip_type: { type: string }
+        route_code: { type: string }
+        bus_number: { type: string }
+        driver_name: { type: string }
+        created_at: { type: string, format: date-time }
+        reported_by: { type: [string, "null"] }
+        minutes: { type: integer }
+        reason: { type: string }
+        note: { type: string }
+        message: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        status: { type: string, enum: [open, acknowledged, resolved] }
+        acknowledged_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+    Announcement:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        school_id: { type: string, format: uuid }
+        category: { type: string }
+        target: { type: string, enum: [school, route] }
+        route_id: { type: [string, "null"], format: uuid }
+        route_code: { type: [string, "null"] }
+        title: { type: string }
+        message: { type: string }
+        attachment_url: { type: string }
+        scheduled_at: { type: [string, "null"], format: date-time }
+        status: { type: string, enum: [scheduled, sending, sent, cancelled] }
+        sent_at: { type: [string, "null"], format: date-time }
+        notification_id: { type: [string, "null"], format: uuid }
+        created_by_name: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        stats:
+          oneOf:
+            - type: "null"
+            - type: object
+              properties:
+                recipients: { type: integer }
+                read: { type: integer }
+                sent: { type: integer }
+                pending: { type: integer }
+                failed: { type: integer }
     StopProgress:
       type: object
       properties:

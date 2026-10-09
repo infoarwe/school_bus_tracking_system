@@ -25,6 +25,7 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/database"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/handlers"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/models"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/notify"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/router"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
@@ -37,12 +38,15 @@ const (
 )
 
 type env struct {
-	t     *testing.T
-	srv   http.Handler
-	pool  *pgxpool.Pool
-	live  *tracking.Live
-	redis *miniredis.Miniredis
-	eta   *fakeETA
+	t      *testing.T
+	srv    http.Handler
+	pool   *pgxpool.Pool
+	live   *tracking.Live
+	redis  *miniredis.Miniredis
+	eta    *fakeETA
+	pushes *fakePush
+	worker *notify.Worker
+	api    *handlers.API
 }
 
 func testSecrets(t *testing.T) *secrets.Box {
@@ -83,23 +87,23 @@ func newEnv(t *testing.T) *env {
 	go hub.Run(hubCtx)
 
 	eta := &fakeETA{}
-	srv := router.New(router.Deps{
-		Health: &handlers.HealthHandler{},
-		API: &handlers.API{
-			Store:                store.New(pool),
-			Tokens:               auth.NewTokenManager("test-secret-test-secret-test-secret", time.Minute, time.Hour),
-			SMS:                  auth.LogSender{},
-			OTPTTL:               5 * time.Minute,
-			OTPDevCode:           devOTP,
-			Secrets:              testSecrets(t),
-			Live:                 live,
-			Hub:                  hub,
-			ETA:                  eta,
-			RequireSuperAdmin2FA: true,
-		},
+	pushes := &fakePush{}
+	api := &handlers.API{
+		Store:                store.New(pool),
+		Tokens:               auth.NewTokenManager("test-secret-test-secret-test-secret", time.Minute, time.Hour),
+		SMS:                  auth.LogSender{},
+		OTPTTL:               5 * time.Minute,
+		OTPDevCode:           devOTP,
+		Secrets:              testSecrets(t),
+		Live:                 live,
+		Hub:                  hub,
+		ETA:                  eta,
+		CheckPushKey:         func(context.Context, []byte) error { return nil },
 		RequireSuperAdmin2FA: true,
-	})
-	return &env{t: t, srv: srv, pool: pool, live: live, redis: mr, eta: eta}
+	}
+	srv := router.New(router.Deps{Health: &handlers.HealthHandler{}, API: api, RequireSuperAdmin2FA: true})
+	return &env{t: t, srv: srv, pool: pool, live: live, redis: mr, eta: eta, pushes: pushes, api: api,
+		worker: &notify.Worker{Store: store.New(pool), Senders: notify.Static{Sender: pushes}}}
 }
 
 type resp struct {

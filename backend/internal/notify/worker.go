@@ -15,8 +15,8 @@ var retryDelays = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.M
 // Worker sends queued pushes. Safe to run on every API instance: rows are
 // claimed with FOR UPDATE SKIP LOCKED.
 type Worker struct {
-	Store  *store.Store
-	Sender Sender
+	Store   *store.Store
+	Senders Senders
 }
 
 // Run polls the queue until ctx ends.
@@ -42,7 +42,10 @@ func (w *Worker) SendDue(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for _, d := range batch {
-		err := w.Sender.Send(ctx, Push{Token: d.Token, Title: d.Title, Body: d.Body, Data: d.Data})
+		sender, err := w.Senders.For(ctx, d.SchoolID)
+		if err == nil {
+			err = sender.Send(ctx, Push{Token: d.Token, Title: d.Title, Body: d.Body, Data: d.Data})
+		}
 		switch {
 		case err == nil:
 			err = store.FinishDelivery(ctx, w.Store.Pool, d.ID, "sent", "", nil)

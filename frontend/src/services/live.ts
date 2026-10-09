@@ -1,6 +1,6 @@
 import { api } from './api'
 import { tokenStore } from './tokenStore'
-import type { TripProgress, TripStatus, TripType } from './types'
+import type { Alert, TripProgress, TripStatus, TripType } from './types'
 
 // Mirrors BusLocation in backend/internal/tracking/live.go.
 export interface BusLocation {
@@ -32,6 +32,7 @@ export type LiveMessage =
   | { type: 'location' | 'bus_stale'; trip_id: string; location: BusLocation }
   | { type: 'trip_status'; trip_id: string; status: TripStatus }
   | { type: 'progress'; trip_id: string; progress: TripProgress }
+  | { type: 'alert'; trip_id: string; alert: Alert }
   | {
       type: 'stop_status'
       trip_id: string

@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Avatar, Dropdown, Flex, Layout, Menu, Select, Typography } from 'antd'
-import { LogoutOutlined, UserOutlined } from '@ant-design/icons'
+import { Avatar, Badge, Button, Dropdown, Flex, Layout, Menu, Select, Typography } from 'antd'
+import { BellOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons'
 import { useAuth } from '../context/AuthContext'
+import { AlertsProvider, useAlerts } from '../context/AlertsContext'
 import { useCurrentSchool } from '../context/SchoolContext'
 import { menu } from '../routes/menu'
 import { roleLabels } from '../services/types'
@@ -10,6 +11,32 @@ import { roleLabels } from '../services/types'
 const { Sider, Header, Content } = Layout
 
 export default function AdminLayout() {
+  return (
+    <AlertsProvider>
+      <AdminShell />
+    </AlertsProvider>
+  )
+}
+
+/** Red bell with the number of unresolved emergencies; opens Delays & Alerts. */
+function AlertBell() {
+  const navigate = useNavigate()
+  const { openEmergencies, alerts } = useAlerts()
+  return (
+    <Badge count={openEmergencies.length} size="small">
+      <Button
+        type="text"
+        icon={<BellOutlined />}
+        danger={openEmergencies.length > 0}
+        aria-label="Alerts"
+        title={`${alerts.length} alert(s) today`}
+        onClick={() => navigate('/alerts')}
+      />
+    </Badge>
+  )
+}
+
+function AdminShell() {
   const [collapsed, setCollapsed] = useState(false)
   const navigate = useNavigate()
   const { pathname } = useLocation()
@@ -52,6 +79,7 @@ export default function AdminLayout() {
               </Typography.Text>
             )}
           </Flex>
+          {schoolId && <AlertBell />}
           <Dropdown
             menu={{
               items: [

@@ -31,6 +31,10 @@ type Config struct {
 	// DataEncryptionKey (64 hex chars) encrypts stored third-party secrets such as
 	// each school's Google Maps server key. Changing it makes stored secrets unreadable.
 	DataEncryptionKey string
+
+	// FCMCredentialsFile is the Firebase service-account JSON (a separate secret file, never in
+	// .env or git). Default: secrets/firebase-service-account.json if it exists. None: pushes are only logged.
+	FCMCredentialsFile string
 }
 
 func Load() (*Config, error) {
@@ -72,6 +76,7 @@ func Load() (*Config, error) {
 		OTPDevCode:           get("OTP_DEV_CODE", ""),
 		RequireSuperAdmin2FA: boolean("REQUIRE_SUPER_ADMIN_2FA", true),
 		DataEncryptionKey:    get("DATA_ENCRYPTION_KEY", ""),
+		FCMCredentialsFile:   fcmCredentialsFile(),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -107,6 +112,20 @@ func (c *Config) ValidateForAPI() error {
 }
 
 func (c *Config) IsProduction() bool { return c.Env == "production" }
+
+// DefaultFCMCredentialsFile is where the Firebase key is looked for when
+// FCM_CREDENTIALS_FILE is not set (see backend/secrets/README.md).
+const DefaultFCMCredentialsFile = "secrets/firebase-service-account.json"
+
+func fcmCredentialsFile() string {
+	if v := get("FCM_CREDENTIALS_FILE", ""); v != "" {
+		return v
+	}
+	if _, err := os.Stat(DefaultFCMCredentialsFile); err == nil {
+		return DefaultFCMCredentialsFile
+	}
+	return ""
+}
 
 func get(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {

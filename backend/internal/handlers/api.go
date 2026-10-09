@@ -32,6 +32,8 @@ type API struct {
 	Hub  *tracking.Hub
 	// ETA computes Google ETAs with each school's server key; nil disables Google (estimate only).
 	ETA ETAProvider
+	// CheckPushKey verifies a school's Firebase key with Google (Settings → Test).
+	CheckPushKey PushKeyChecker
 	// WSOriginPatterns are the browser origins allowed to open the WebSocket (host[:port]).
 	WSOriginPatterns []string
 
@@ -114,6 +116,10 @@ func internalError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func internalErrorLog(r *http.Request, err error) {
+	if r == nil {
+		slog.Error("background error", "err", err)
+		return
+	}
 	slog.Error("request failed", "request_id", chimw.GetReqID(r.Context()), "path", r.URL.Path, "err", err)
 }
 

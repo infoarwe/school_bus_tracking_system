@@ -54,10 +54,15 @@ func (c *Client) SubscribeTrip(tripID string, on bool) {
 	c.mu.Unlock()
 }
 
-func (c *Client) wants(tripID string) bool {
+// wants: staff-only events go to school-channel subscribers (only staff may
+// subscribe to the school); trip events go to that trip's subscribers too.
+func (c *Client) wants(ev Event) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.allSchool || c.trips[tripID]
+	if ev.Audience == AudienceStaff {
+		return c.allSchool
+	}
+	return c.allSchool || c.trips[ev.TripID]
 }
 
 // Close ends the client once; the connection handler watches Closed.
@@ -87,7 +92,7 @@ func (h *Hub) Deliver(schoolID string, ev Event, raw []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients[schoolID] {
-		if !c.wants(ev.TripID) {
+		if !c.wants(ev) {
 			continue
 		}
 		select {

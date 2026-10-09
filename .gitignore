@@ -25,3 +25,7 @@ Thumbs.db
 # Local temp
 .tmp-*
 *.log
+
+# Secret files (Firebase service account, ...): never commit
+backend/secrets/*
+!backend/secrets/README.md

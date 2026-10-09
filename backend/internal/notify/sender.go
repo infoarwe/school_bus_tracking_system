@@ -42,19 +42,24 @@ func (LogSender) Send(_ context.Context, p Push) error {
 }
 
 // FCMSender sends through the Firebase Cloud Messaging HTTP v1 API with a
-// service account. One Firebase project serves all schools (the apps are shared).
+// service account: a school's own Firebase project, or the server-wide fallback key.
 type FCMSender struct {
 	projectID string
 	client    *http.Client
 	endpoint  string
 }
 
-// NewFCMSender reads a Firebase service-account JSON file.
+// NewFCMSender reads a Firebase service-account JSON file (server-wide fallback key).
 func NewFCMSender(ctx context.Context, credentialsFile string) (*FCMSender, error) {
 	raw, err := os.ReadFile(credentialsFile)
 	if err != nil {
 		return nil, fmt.Errorf("read FCM credentials: %w", err)
 	}
+	return NewFCMSenderJSON(ctx, raw)
+}
+
+// NewFCMSenderJSON builds a sender from a service-account JSON (a school's uploaded key).
+func NewFCMSenderJSON(ctx context.Context, raw []byte) (*FCMSender, error) {
 	creds, err := google.CredentialsFromJSON(ctx, raw, "https://www.googleapis.com/auth/firebase.messaging")
 	if err != nil {
 		return nil, fmt.Errorf("parse FCM credentials: %w", err)
@@ -62,13 +67,26 @@ func NewFCMSender(ctx context.Context, credentialsFile string) (*FCMSender, erro
 	if creds.ProjectID == "" {
 		return nil, errors.New("FCM credentials have no project_id")
 	}
-	client := oauth2.NewClient(ctx, creds.TokenSource)
+	// The token source lives as long as the sender, not the request that built it.
+	client := oauth2.NewClient(context.Background(), creds.TokenSource)
 	client.Timeout = 10 * time.Second
 	return &FCMSender{
 		projectID: creds.ProjectID,
 		client:    client,
 		endpoint:  "https://fcm.googleapis.com/v1/projects/" + creds.ProjectID + "/messages:send",
 	}, nil
+}
+
+// CheckAuth gets an access token: proves the key is valid and not revoked.
+func (s *FCMSender) CheckAuth(ctx context.Context) error {
+	ts, ok := s.client.Transport.(*oauth2.Transport)
+	if !ok {
+		return errors.New("unexpected FCM client")
+	}
+	if _, err := ts.Source.Token(); err != nil {
+		return fmt.Errorf("google rejected the key: %w", err)
+	}
+	return nil
 }
 
 func (s *FCMSender) Send(ctx context.Context, p Push) error {

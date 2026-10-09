@@ -381,3 +381,93 @@ export interface TripProgressResponse {
   progress: TripProgress | null
   events: StopEventRow[]
 }
+
+export type AnnouncementCategory =
+  | 'school_announcement'
+  | 'route_announcement'
+  | 'bus_breakdown'
+  | 'traffic_delay'
+  | 'pickup_change'
+  | 'emergency_message'
+  | 'holiday'
+  | 'other'
+
+export const announcementCategoryLabels: Record<AnnouncementCategory, string> = {
+  school_announcement: 'School announcement',
+  route_announcement: 'Route announcement',
+  bus_breakdown: 'Bus breakdown',
+  traffic_delay: 'Traffic delay',
+  pickup_change: 'Pickup change',
+  emergency_message: 'Emergency message',
+  holiday: 'Holiday',
+  other: 'Other',
+}
+
+export interface DeliveryStats {
+  recipients: number
+  read: number
+  sent: number
+  pending: number
+  failed: number
+}
+
+export interface Announcement {
+  id: string
+  school_id: string
+  category: AnnouncementCategory
+  target: 'school' | 'route'
+  route_id: string | null
+  route_code: string | null
+  title: string
+  message: string
+  attachment_url: string
+  scheduled_at: string | null
+  status: 'scheduled' | 'sending' | 'sent' | 'cancelled'
+  sent_at: string | null
+  created_by_name: string | null
+  created_at: string
+  stats: DeliveryStats | null
+}
+
+export interface AnnouncementInput {
+  category: AnnouncementCategory
+  target: 'school' | 'route'
+  route_id?: string | null
+  title: string
+  message: string
+  attachment_url?: string
+  scheduled_at?: string | null
+}
+
+export type DelayReason =
+  'traffic' | 'bus_breakdown' | 'road_block' | 'weather' | 'driver_issue' | 'other'
+
+export const delayReasonLabels: Record<DelayReason, string> = {
+  traffic: 'Traffic',
+  bus_breakdown: 'Bus breakdown',
+  road_block: 'Road block',
+  weather: 'Weather',
+  driver_issue: 'Driver issue',
+  other: 'Other',
+}
+
+export interface Alert {
+  kind: 'delay' | 'emergency'
+  id: string
+  trip_id: string
+  trip_type: TripType
+  route_code: string
+  bus_number: string
+  driver_name: string
+  created_at: string
+  reported_by: string | null
+  minutes?: number
+  reason?: DelayReason
+  note?: string
+  message?: string
+  latitude?: number
+  longitude?: number
+  status?: 'open' | 'acknowledged' | 'resolved'
+  acknowledged_at?: string
+  resolved_at?: string
+}

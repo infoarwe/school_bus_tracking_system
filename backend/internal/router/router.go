@@ -86,6 +86,8 @@ func New(d Deps) http.Handler {
 				r.Delete("/auth/sessions/{sessionID}", a.RevokeSession)
 
 				// Driver and Parent apps: scoped to the caller, no school ID in the path.
+				r.With(middleware.RequireRoles(models.AppRoles...)).Post("/devices", a.RegisterDevice)
+				r.With(middleware.RequireRoles(models.AppRoles...)).Post("/devices/unregister", a.UnregisterDevice)
 				r.Route("/driver", func(r chi.Router) {
 					r.Use(middleware.RequireRoles(models.RoleDriver))
 					r.Get("/me", a.DriverMe)
@@ -96,6 +98,8 @@ func New(d Deps) http.Handler {
 					r.Post("/trips/{tripID}/end", a.DriverEndTrip)
 					r.Post("/trips/{tripID}/locations", a.DriverPostLocations)
 					r.Get("/trips/{tripID}/progress", a.DriverTripProgress)
+					r.Post("/trips/{tripID}/delays", a.DriverReportDelay)
+					r.Post("/trips/{tripID}/emergency", a.DriverReportEmergency)
 				})
 				r.Route("/parent", func(r chi.Router) {
 					r.Use(middleware.RequireRoles(models.RoleParent))
@@ -103,6 +107,8 @@ func New(d Deps) http.Handler {
 					r.Get("/children/{studentID}", a.ParentChild)
 					r.Get("/children/{studentID}/trips", a.ParentChildTrips)
 					r.Get("/children/{studentID}/live", a.ParentChildLive)
+					r.Get("/notifications", a.ParentNotifications)
+					r.Post("/notifications/read", a.MarkNotificationsRead)
 				})
 
 				r.With(superAdmin).Get("/schools", a.ListSchools)
@@ -118,6 +124,10 @@ func New(d Deps) http.Handler {
 					r.With(superAdmin).Patch("/status", a.SetSchoolStatus)
 					r.With(webRoles).Get("/settings/maps", a.GetMapsSettings)
 					r.With(userAdmins).Put("/settings/maps", a.UpdateMapsSettings)
+					r.With(userAdmins).Get("/settings/push", a.GetPushSettings)
+					r.With(userAdmins).Put("/settings/push", a.UpdatePushSettings)
+					r.With(userAdmins).Delete("/settings/push", a.DeletePushSettings)
+					r.With(userAdmins).Post("/settings/push/test", a.TestPushSettings)
 					r.With(webRoles).Get("/settings/tracking", a.GetTrackingSettings)
 					r.With(userAdmins).Put("/settings/tracking", a.UpdateTrackingSettings)
 					r.With(webRoles).Get("/live", a.LiveSnapshot)
@@ -172,6 +182,15 @@ func New(d Deps) http.Handler {
 						r.Post("/trips/copy", a.CopyTrips)
 						r.Get("/trips/{tripID}", a.GetTrip)
 						r.Get("/trips/{tripID}/progress", a.TripProgress)
+						r.Post("/trips/{tripID}/delays", a.StaffReportDelay)
+
+						// Alerts, and announcements (whole-school ones: admins only, checked in the handler).
+						r.Get("/alerts", a.SchoolAlerts)
+						r.Post("/emergencies/{emergencyID}/acknowledge", a.UpdateEmergency("acknowledged"))
+						r.Post("/emergencies/{emergencyID}/resolve", a.UpdateEmergency("resolved"))
+						r.Get("/announcements", a.ListAnnouncements)
+						r.Post("/announcements", a.CreateAnnouncement)
+						r.Post("/announcements/{announcementID}/cancel", a.CancelAnnouncement)
 						r.Put("/trips/{tripID}", a.UpdateTrip)
 						r.Post("/trips/{tripID}/cancel", a.CancelTrip)
 						r.Post("/trips/{tripID}/override", a.OverrideTrip)

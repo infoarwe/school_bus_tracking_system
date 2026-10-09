@@ -167,17 +167,18 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S7-01 | BE | Device token registration API (parent + driver) | Token stored per device |
-| S7-02 | BE | Push service (FCM) + notification queue/worker with retry + delivery status | Delivery status recorded |
-| S7-03 | BE | Auto notifications from trip/stop events: Started, Approaching (with ETA), Reached, Crossed, Delayed, School Reached, Completed; no duplicates per stop per trip | Each fires once |
-| S7-04 | BE | Announcements: title, message, attachment, target (Entire School / Specific Route), manual or scheduled; history | Route target reaches only that route's parents |
-| S7-05 | BE | Delay & breakdown: driver reports (minutes + reason), admin reports; notify affected-route parents | Parents of route get "Bus Delayed by 15 Minutes…" |
-| S7-06 | BE | Emergency report from driver → alert to admins in real time | Admin sees alert instantly |
+| ✅ S7-01 | BE | Device token registration API (parent + driver) | Token stored per device |
+| ✅ S7-02 | BE | Push service (FCM) + notification queue/worker with retry + delivery status | Delivery status recorded |
+| ✅ S7-03 | BE | Auto notifications from trip/stop events: Started, Approaching (with ETA), Reached, Crossed, Delayed, School Reached, Completed; no duplicates per stop per trip | Each fires once |
+| ✅ S7-04 | BE | Announcements: title, message, attachment, target (Entire School / Specific Route), manual or scheduled; history | Route target reaches only that route's parents |
+| ✅ S7-05 | BE | Delay & breakdown: driver reports (minutes + reason), admin reports; notify affected-route parents | Parents of route get "Bus Delayed by 15 Minutes…" |
+| ✅ S7-06 | BE | Emergency report from driver → alert to admins in real time | Admin sees alert instantly |
 | S7-07 | MOB | Driver: report delay / breakdown / emergency screens | Works end to end |
 | S7-08 | MOB | Parent: push handling, notification inbox, per-child filter | Notifications listed |
-| S7-09 | FE | Announcement composer + scheduled list + history with delivery stats | Full flow |
-| S7-10 | FE | Alerts panel (delays, breakdowns, emergencies) on live map | Live alerts |
+| ✅ S7-09 | FE | Announcement composer + scheduled list + history with delivery stats | Full flow |
+| ✅ S7-10 | FE | Alerts panel (delays, breakdowns, emergencies) on live map | Live alerts |
 | S7-11 | API | **Handoff 6, Notifications:** device token API, FCM payload format (type, data keys, child/trip IDs for deep links), notification inbox API, delay/breakdown/emergency report APIs | Push received on test device |
+| ✅ S7-12 | BE+FE | Per-school Firebase key: upload in Settings → Push notifications (validated, encrypted, test with Google); each school's pushes go through its own project | Pushes use the school's own key |
 
 ---
 
@@ -195,6 +196,7 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 | S8-06 | BE+FE | Audit log viewer: Super = all, School = own school, Transport = transport actions | Scope tests pass |
 | S8-07 | BE+FE | Settings: global (Super Admin), school-level limited settings (geofence default, approaching distance, retention days, stale timeout) | Settings take effect |
 | S8-08 | BE | Super Admin critical actions require confirmation (e.g., delete school) | Confirm step + audited |
+| S8-09 | BE+FE | Per-school branding for the white-label apps: app name, logo, colours (needs file storage for logos); API for the apps to fetch their school's branding | Each school's apps show its own brand |
 
 ---
 

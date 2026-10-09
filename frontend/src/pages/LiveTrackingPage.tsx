@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { App, Badge, Card, Col, Empty, Flex, Row, Space, Tag, Typography } from 'antd'
+import AlertList from '../components/AlertList'
 import LiveMap from '../components/LiveMap'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
@@ -153,6 +154,9 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
                 </div>
               </div>
             ))}
+          </Card>
+          <Card title="Alerts" size="small" style={{ marginTop: 16 }}>
+            <AlertList schoolId={schoolId} compact />
           </Card>
           {selected && (
             <Card

@@ -86,6 +86,9 @@ func (a *API) processProgress(ctx context.Context, r *http.Request, t *models.Tr
 	if err := a.Live.SaveProgress(ctx, t.SchoolID, p, events); err != nil {
 		return err
 	}
+	if err := a.notifyStopEvents(ctx, t, p, events); err != nil {
+		internalErrorLog(r, err) // the stop status is saved; only the push is affected
+	}
 	if p.NeedsGoogleRefresh(now, g) {
 		a.refreshGoogleETA(t, p)
 	}
