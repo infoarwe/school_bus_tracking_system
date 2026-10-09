@@ -471,3 +471,67 @@ export interface Alert {
   acknowledged_at?: string
   resolved_at?: string
 }
+
+export interface DashboardData {
+  today: string
+  totals: {
+    buses_active: number
+    buses_total: number
+    buses_in_maintenance: number
+    drivers_active: number
+    students_on_transport: number
+    students_unassigned: number
+    routes_active: number
+  }
+  /** trip type → status → count, for today */
+  trips: Partial<Record<TripType, Partial<Record<TripStatus, number>>>>
+  live: { on_road: number; offline: number }
+  delayed_trips: number
+  open_emergencies: number
+  routes: {
+    route_id: string
+    code: string
+    name: string
+    students: number
+    morning_status: TripStatus | null
+    evening_status: TripStatus | null
+    morning_bus: string | null
+    evening_bus: string | null
+    delays: number
+    missed_stops: number
+  }[]
+}
+
+export type ReportFilterName = 'from' | 'to' | 'route_id' | 'bus_id' | 'driver_id' | 'trip_id'
+
+export interface ReportDef {
+  key: string
+  title: string
+  description: string
+  filters: ReportFilterName[]
+  columns: { key: string; label: string }[]
+}
+
+export interface AuditRow {
+  id: string
+  school_id: string | null
+  school_name: string | null
+  actor_id: string | null
+  actor_name: string | null
+  actor_role: string
+  action: string
+  entity_type: string
+  entity_id: string | null
+  before: unknown
+  after: unknown
+  ip: string
+  request_id: string
+  created_at: string
+}
+
+export interface TrackPoint {
+  latitude: number
+  longitude: number
+  speed_mps: number | null
+  recorded_at: string
+}

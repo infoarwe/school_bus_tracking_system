@@ -20,10 +20,11 @@ import {
   Timeline,
   Typography,
 } from 'antd'
-import { CopyOutlined, DownOutlined, PlusOutlined } from '@ant-design/icons'
+import { CopyOutlined, DownOutlined, HistoryOutlined, PlusOutlined } from '@ant-design/icons'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StopProgressList from '../components/StopProgressList'
+import TripReplay from '../components/TripReplay'
 import { useCurrentSchool } from '../context/SchoolContext'
 import { useTripProgress } from '../hooks/useTripProgress'
 import { busesApi, driversApi, routesApi } from '../services/transport'
@@ -656,6 +657,7 @@ function TripDrawer({
   const { message } = App.useApp()
   const [trip, setTrip] = useState<TripDetail | null>(null)
   const live = useTripProgress(schoolId, tripId)
+  const [replaying, setReplaying] = useState(false)
 
   useEffect(() => {
     tripsApi
@@ -686,6 +688,24 @@ function TripDrawer({
             <Descriptions.Item label="Students">{trip.student_count}</Descriptions.Item>
             {trip.notes && <Descriptions.Item label="Notes">{trip.notes}</Descriptions.Item>}
           </Descriptions>
+          {trip.started_at && (
+            <Button
+              icon={<HistoryOutlined />}
+              onClick={() => setReplaying(true)}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              Replay GPS
+            </Button>
+          )}
+          {replaying && (
+            <TripReplay
+              schoolId={schoolId}
+              tripId={trip.id}
+              title={`${trip.route.code} · ${tripTypeLabels[trip.trip_type]} · ${formatDate(trip.trip_date)}`}
+              stops={trip.stops}
+              onClose={() => setReplaying(false)}
+            />
+          )}
 
           <div>
             <Typography.Title level={5}>Stop progress</Typography.Title>

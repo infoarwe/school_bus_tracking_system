@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -171,6 +172,8 @@ func (a *API) SetSchoolStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Status string `json:"status"`
+		// Critical action: deactivating requires typing the school's code.
+		ConfirmCode string `json:"confirm_code"`
 	}
 	if !httpx.Decode(w, r, &req) {
 		return
@@ -187,6 +190,9 @@ func (a *API) SetSchoolStatus(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if req.Status == models.StatusInactive && !strings.EqualFold(strings.TrimSpace(req.ConfirmCode), before.Code) {
+			return errConfirmCode
+		}
 		if after, err = store.SetSchoolStatus(r.Context(), q, id, req.Status); err != nil {
 			return err
 		}
@@ -195,9 +201,15 @@ func (a *API) SetSchoolStatus(w http.ResponseWriter, r *http.Request) {
 			Before: map[string]string{"status": before.Status}, After: map[string]string{"status": after.Status},
 		})
 	})
+	if errors.Is(err, errConfirmCode) {
+		httpx.ValidationError(w, validate.Errors{"confirm_code": "type the school code to confirm deactivation"})
+		return
+	}
 	if err != nil {
 		storeError(w, r, err, nil)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, after)
 }
+
+var errConfirmCode = errors.New("confirmation code does not match")

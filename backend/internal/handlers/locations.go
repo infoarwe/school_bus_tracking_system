@@ -144,6 +144,10 @@ func (a *API) UpdateTrackingSettings(w http.ResponseWriter, r *http.Request) {
 	v.Check(req.LocationRetentionDays >= 0 && req.LocationRetentionDays <= 365, "location_retention_days", "must be 0 to 365")
 	v.Check(req.StaleAfterSeconds >= 30 && req.StaleAfterSeconds <= 1800, "stale_after_seconds", "must be 30 to 1800")
 	v.Check(req.ApproachDistanceM >= 100 && req.ApproachDistanceM <= 5000, "approach_distance_m", "must be 100 to 5000")
+	if req.DefaultGeofenceM == 0 {
+		req.DefaultGeofenceM = defaultGeofenceM
+	}
+	v.Check(req.DefaultGeofenceM >= minGeofenceM && req.DefaultGeofenceM <= maxGeofenceM, "default_geofence_m", "must be 25 to 1000")
 	v.Check((req.SchoolLatitude == nil) == (req.SchoolLongitude == nil), "school_latitude", "give both latitude and longitude, or neither")
 	if req.SchoolLatitude != nil && req.SchoolLongitude != nil {
 		v.Check(*req.SchoolLatitude >= -90 && *req.SchoolLatitude <= 90 && *req.SchoolLongitude >= -180 && *req.SchoolLongitude <= 180 &&

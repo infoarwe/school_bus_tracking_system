@@ -188,14 +188,14 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S8-01 | BE | Dashboard API: totals (buses, drivers, students, active routes), live buses, trips started/completed, delayed, offline, route-wise summary | Single endpoint, fast |
-| S8-02 | FE | Dashboard page with cards + route summary + alerts | Matches module 21 |
-| S8-03 | BE | Reports: trip, bus journey, driver trip, route performance, delay, assignment, notification, location history; filters + CSV export | Each report exports CSV |
-| S8-04 | FE | Reports pages with filters, table, export | All 8 reports |
-| S8-05 | FE | Trip replay (location history on map) | Replays a completed trip |
-| S8-06 | BE+FE | Audit log viewer: Super = all, School = own school, Transport = transport actions | Scope tests pass |
-| S8-07 | BE+FE | Settings: global (Super Admin), school-level limited settings (geofence default, approaching distance, retention days, stale timeout) | Settings take effect |
-| S8-08 | BE | Super Admin critical actions require confirmation (e.g., delete school) | Confirm step + audited |
+| ✅ S8-01 | BE | Dashboard API: totals (buses, drivers, students, active routes), live buses, trips started/completed, delayed, offline, route-wise summary | Single endpoint, fast |
+| ✅ S8-02 | FE | Dashboard page with cards + route summary + alerts | Matches module 21 |
+| ✅ S8-03 | BE | Reports: trip, bus journey, driver trip, route performance, delay, assignment, notification, location history; filters + CSV export | Each report exports CSV |
+| ✅ S8-04 | FE | Reports pages with filters, table, export | All 8 reports |
+| ✅ S8-05 | FE | Trip replay (location history on map) | Replays a completed trip |
+| ✅ S8-06 | BE+FE | Audit log viewer: Super = all, School = own school, Transport = transport actions | Scope tests pass |
+| ◐ S8-07 | BE+FE | Settings: school-level done (maps keys, Firebase key, default arrival radius, approaching distance, GPS retention, offline threshold, school location). Platform-wide Super Admin settings: none needed yet | Settings take effect |
+| ✅ S8-08 | BE | Super Admin critical actions require confirmation (e.g., delete school) | Confirm step + audited |
 | S8-09 | BE+FE | Per-school branding for the white-label apps: app name, logo, colours (needs file storage for logos); API for the apps to fetch their school's branding | Each school's apps show its own brand |
 
 ---

@@ -40,15 +40,16 @@ type TrackingSettings struct {
 	LocationRetentionDays int      `json:"location_retention_days"`
 	StaleAfterSeconds     int      `json:"stale_after_seconds"`
 	ApproachDistanceM     int      `json:"approach_distance_m"`
-	SchoolLatitude        *float64 `json:"school_latitude"`  // destination of Morning Pickup
-	SchoolLongitude       *float64 `json:"school_longitude"` // (null: "School Reached" is not detected)
+	SchoolLatitude        *float64 `json:"school_latitude"`    // destination of Morning Pickup
+	SchoolLongitude       *float64 `json:"school_longitude"`   // (null: "School Reached" is not detected)
+	DefaultGeofenceM      int      `json:"default_geofence_m"` // arrival radius for new stops
 }
 
 func GetTrackingSettings(ctx context.Context, q DBTX, schoolID string) (*TrackingSettings, error) {
 	var s TrackingSettings
-	err := q.QueryRow(ctx, `SELECT location_retention_days, stale_after_seconds, approach_distance_m, latitude, longitude
-		FROM schools WHERE id = $1`, schoolID).
-		Scan(&s.LocationRetentionDays, &s.StaleAfterSeconds, &s.ApproachDistanceM, &s.SchoolLatitude, &s.SchoolLongitude)
+	err := q.QueryRow(ctx, `SELECT location_retention_days, stale_after_seconds, approach_distance_m, latitude, longitude,
+		default_geofence_m FROM schools WHERE id = $1`, schoolID).
+		Scan(&s.LocationRetentionDays, &s.StaleAfterSeconds, &s.ApproachDistanceM, &s.SchoolLatitude, &s.SchoolLongitude, &s.DefaultGeofenceM)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -57,8 +58,8 @@ func GetTrackingSettings(ctx context.Context, q DBTX, schoolID string) (*Trackin
 
 func SetTrackingSettings(ctx context.Context, q DBTX, schoolID string, s TrackingSettings) error {
 	tag, err := q.Exec(ctx, `UPDATE schools SET location_retention_days = $2, stale_after_seconds = $3,
-		approach_distance_m = $4, latitude = $5, longitude = $6 WHERE id = $1`,
-		schoolID, s.LocationRetentionDays, s.StaleAfterSeconds, s.ApproachDistanceM, s.SchoolLatitude, s.SchoolLongitude)
+		approach_distance_m = $4, latitude = $5, longitude = $6, default_geofence_m = $7 WHERE id = $1`,
+		schoolID, s.LocationRetentionDays, s.StaleAfterSeconds, s.ApproachDistanceM, s.SchoolLatitude, s.SchoolLongitude, s.DefaultGeofenceM)
 	if err != nil {
 		return mapErr(err)
 	}

@@ -13,6 +13,7 @@ import {
   Row,
   Space,
   Table,
+  Typography,
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
@@ -53,9 +54,11 @@ export default function SchoolsPage() {
     void reloadSchools() // keep the header's school picker in sync
   }, [reloadList, reloadSchools])
 
-  async function toggleStatus(s: School) {
+  const [deactivating, setDeactivating] = useState<School | null>(null)
+
+  async function toggleStatus(s: School, confirmCode?: string) {
     try {
-      await schoolsApi.setStatus(s.id, s.status === 'active' ? 'inactive' : 'active')
+      await schoolsApi.setStatus(s.id, s.status === 'active' ? 'inactive' : 'active', confirmCode)
       message.success(`${s.name} is now ${s.status === 'active' ? 'inactive' : 'active'}.`)
       reload()
     } catch (e) {
@@ -65,6 +68,16 @@ export default function SchoolsPage() {
 
   return (
     <Flex vertical gap="middle">
+      {deactivating && (
+        <ConfirmDeactivate
+          school={deactivating}
+          onClose={() => setDeactivating(null)}
+          onConfirm={async (code) => {
+            await toggleStatus(deactivating, code)
+            setDeactivating(null)
+          }}
+        />
+      )}
       <PageHeader
         title="Schools"
         extra={
@@ -114,21 +127,19 @@ export default function SchoolsPage() {
                 >
                   Users
                 </Button>
-                <Popconfirm
-                  title={
-                    s.status === 'active' ? 'Deactivate this school?' : 'Activate this school?'
-                  }
-                  description={
-                    s.status === 'active'
-                      ? 'All its users are logged out and cannot log in.'
-                      : 'Its users can log in again.'
-                  }
-                  onConfirm={() => toggleStatus(s)}
-                >
-                  <Button size="small" danger={s.status === 'active'}>
-                    {s.status === 'active' ? 'Deactivate' : 'Activate'}
+                {s.status === 'active' ? (
+                  <Button size="small" danger onClick={() => setDeactivating(s)}>
+                    Deactivate
                   </Button>
-                </Popconfirm>
+                ) : (
+                  <Popconfirm
+                    title="Activate this school?"
+                    description="Its users can log in again."
+                    onConfirm={() => toggleStatus(s)}
+                  >
+                    <Button size="small">Activate</Button>
+                  </Popconfirm>
+                )}
               </Space>
             ),
           },
@@ -269,6 +280,52 @@ function SchoolForm({
           </Col>
         </Row>
       </Form>
+    </Modal>
+  )
+}
+
+/** Critical action: the Super Admin types the school code to confirm (recorded in the audit log). */
+function ConfirmDeactivate({
+  school,
+  onClose,
+  onConfirm,
+}: {
+  school: School
+  onClose: () => void
+  onConfirm: (code: string) => Promise<void>
+}) {
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  return (
+    <Modal
+      open
+      title={`Deactivate ${school.name}?`}
+      okText="Deactivate school"
+      okButtonProps={{
+        danger: true,
+        disabled: code.trim().toUpperCase() !== school.code.toUpperCase(),
+      }}
+      confirmLoading={busy}
+      onCancel={onClose}
+      onOk={async () => {
+        setBusy(true)
+        await onConfirm(code.trim())
+        setBusy(false)
+      }}
+    >
+      <Typography.Paragraph>
+        Every user of this school (admins, drivers, parents) is logged out and cannot log in, and
+        its buses stop being tracked. You can activate it again later.
+      </Typography.Paragraph>
+      <Typography.Paragraph>
+        Type the school code <Typography.Text code>{school.code}</Typography.Text> to confirm.
+      </Typography.Paragraph>
+      <Input
+        value={code}
+        onChange={(e) => setCode(e.target.value)}
+        autoFocus
+        placeholder={school.code}
+      />
     </Modal>
   )
 }

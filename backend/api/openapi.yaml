@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.8.1
+  version: 0.9.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -122,6 +122,7 @@ info:
     | `live_unavailable` | 503 | Keep GPS points queued and retry. |
 
     ## Changelog
+    - 0.9.0 (Sprint 8): dashboard, reports (JSON + CSV), trip GPS track, audit log viewer, school deactivation confirm, default stop radius.
     - 0.8.1: per-school Firebase key (Settings → Push notifications); each school's apps use their own Firebase project.
     - 0.8.0 (Sprint 7): **mobile handoff 6**: `POST /devices`, push payloads (see Push notifications), parent inbox,
       `POST /driver/trips/{id}/delays`, `POST /driver/trips/{id}/emergency`. Admin: alerts, announcements.
@@ -164,6 +165,8 @@ tags:
   - name: Alerts
     description: Delays, breakdowns and emergencies.
   - name: Announcements
+  - name: Dashboard & reports
+  - name: Audit
   - name: Settings
   - name: System
 security:
@@ -547,6 +550,7 @@ paths:
               required: [status]
               properties:
                 status: { type: string, enum: [active, inactive] }
+                confirm_code: { type: string, description: "Required to deactivate: the school's code, typed to confirm." }
       responses:
         "200":
           description: Updated.
@@ -2400,6 +2404,160 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/v1/schools/{schoolID}/dashboard:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Dashboard & reports]
+      summary: School overview for today
+      description: Totals, today's trips by type and status, live and offline buses, delays, emergencies, per-route summary.
+      operationId: getDashboard
+      responses:
+        "200":
+          description: Overview.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { type: object, additionalProperties: true } } }
+
+  /api/v1/schools/{schoolID}/reports:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Dashboard & reports]
+      summary: Available reports (key, title, filters, columns)
+      operationId: listReports
+      responses:
+        "200":
+          description: Report definitions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string, enum: [trips, bus_journeys, driver_trips, route_performance, delays, assignments, notifications, location_history] }
+                        title: { type: string }
+                        description: { type: string }
+                        filters: { type: array, items: { type: string } }
+                        columns: { type: array, items: { type: object, properties: { key: { type: string }, label: { type: string } } } }
+
+  /api/v1/schools/{schoolID}/reports/{report}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: report, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Dashboard & reports]
+      summary: Run a report (JSON preview or CSV download)
+      description: |
+        Filters per report (see the list): `from`/`to` (YYYY-MM-DD, at most one year), `route_id`, `bus_id`, `driver_id`,
+        `trip_id` (location history). JSON is paged (max 500 rows a page). `format=csv` downloads every row
+        (UTF-8 with BOM for Excel; cells that look like formulas are prefixed with '). Exports are audit-logged.
+      operationId: runReport
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [json, csv], default: json } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: route_id, in: query, schema: { type: string, format: uuid } }
+        - { name: bus_id, in: query, schema: { type: string, format: uuid } }
+        - { name: driver_id, in: query, schema: { type: string, format: uuid } }
+        - { name: trip_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/Page" }
+        - { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 20 } }
+      responses:
+        "200":
+          description: "JSON: `data.report` (definition) and `data.rows` (arrays of strings in column order); or a CSV file."
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+            text/csv:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/track:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Trips]
+      summary: Stored GPS track of a trip (replay)
+      operationId: getTripTrack
+      responses:
+        "200":
+          description: Points in time order (empty if the school keeps no GPS history).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        latitude: { type: number }
+                        longitude: { type: number }
+                        speed_mps: { type: [number, "null"] }
+                        recorded_at: { type: string, format: date-time }
+
+  /api/v1/schools/{schoolID}/audit-logs:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Audit]
+      summary: The school's audit log
+      description: Super Admin and School Admin see every entry of the school; a Transport Manager only transport entries (drivers, buses, routes, stops, trips, emergencies).
+      operationId: listSchoolAuditLogs
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: action, in: query, description: "Prefix, e.g. trip. or user.suspend", schema: { type: string } }
+        - { name: entity_type, in: query, schema: { type: string } }
+        - { name: entity_id, in: query, schema: { type: string, format: uuid } }
+        - { name: actor_id, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/AuditRow" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+
+  /api/v1/audit-logs:
+    get:
+      tags: [Audit]
+      summary: Platform-wide audit log (Super Admin)
+      description: Every school plus platform-level entries; `school_id` narrows to one school.
+      operationId: listPlatformAuditLogs
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: school_id, in: query, schema: { type: string, format: uuid } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: entity_type, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/AuditRow" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2417,6 +2575,23 @@ components:
     PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
 
   schemas:
+    AuditRow:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        school_id: { type: [string, "null"], format: uuid }
+        school_name: { type: [string, "null"] }
+        actor_id: { type: [string, "null"], format: uuid }
+        actor_name: { type: [string, "null"] }
+        actor_role: { type: string }
+        action: { type: string, example: trip.started }
+        entity_type: { type: string }
+        entity_id: { type: [string, "null"], format: uuid }
+        before: { description: State before (any JSON) }
+        after: { description: State after (any JSON) }
+        ip: { type: string }
+        request_id: { type: string }
+        created_at: { type: string, format: date-time }
     PushSettings:
       type: object
       properties:
@@ -2622,6 +2797,7 @@ components:
         approach_distance_m: { type: integer, minimum: 100, maximum: 5000, description: '"Approaching" fires within this distance.' }
         school_latitude: { type: [number, "null"], description: "The school's location: Morning Pickup destination (School Reached)." }
         school_longitude: { type: [number, "null"] }
+        default_geofence_m: { type: integer, minimum: 25, maximum: 1000, default: 100, description: Arrival radius for new stops. }
     TripInput:
       type: object
       required: [trip_date, trip_type, route_id, bus_id, driver_id]

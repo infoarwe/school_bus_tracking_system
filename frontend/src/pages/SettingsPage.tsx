@@ -198,6 +198,14 @@ function TrackingSettingsCard({ schoolId }: { schoolId: string }) {
             <InputNumber min={30} max={1800} step={30} style={{ width: 160 }} />
           </Form.Item>
           <Form.Item
+            name="default_geofence_m"
+            label="Default arrival radius for new stops (metres)"
+            extra="Each stop can still have its own radius on the route page."
+            rules={[{ required: true }]}
+          >
+            <InputNumber min={25} max={1000} step={25} style={{ width: 160 }} />
+          </Form.Item>
+          <Form.Item
             name="approach_distance_m"
             label='"Approaching" alert distance (metres)'
             extra="The stop shows as approaching, and parents are alerted, when the bus is this close."

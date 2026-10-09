@@ -30,6 +30,8 @@ export default function GoogleRouteMap({
   onPick,
   picked,
   height = 480,
+  track,
+  bus,
 }: RouteMapProps & { apiKey: string }) {
   return (
     <APIProvider apiKey={apiKey}>
@@ -45,7 +47,7 @@ export default function GoogleRouteMap({
           if (onPick && p) onPick(Number(p.lat.toFixed(6)), Number(p.lng.toFixed(6)))
         }}
       >
-        <Overlay stops={stops} highlightId={highlightId} picked={picked} />
+        <Overlay stops={stops} highlightId={highlightId} picked={picked} track={track} bus={bus} />
       </Map>
     </APIProvider>
   )
@@ -55,15 +57,27 @@ function Overlay({
   stops,
   highlightId,
   picked,
-}: Pick<RouteMapProps, 'stops' | 'highlightId' | 'picked'>) {
+  track,
+  bus,
+}: Pick<RouteMapProps, 'stops' | 'highlightId' | 'picked' | 'track' | 'bus'>) {
   const path = useMemo(() => stops.map((s) => ({ lat: s.latitude, lng: s.longitude })), [stops])
   const highlighted = stops.find((s) => s.id === highlightId)
 
   return (
     <>
       <FitToPoints
-        points={picked ? [...path, { lat: picked.latitude, lng: picked.longitude }] : path}
+        points={
+          track?.length
+            ? track
+            : picked
+              ? [...path, { lat: picked.latitude, lng: picked.longitude }]
+              : path
+        }
       />
+      {track && track.length > 1 && (
+        <Polyline path={track} strokeColor={BLUE} strokeOpacity={0.7} strokeWeight={3} />
+      )}
+      {bus && <Marker position={bus} zIndex={1000} {...numberMarker('🚌', true)} />}
       {path.length > 1 && <Polyline path={path} strokeColor={ORANGE} strokeWeight={4} />}
       {stops.map((s) => (
         <Marker

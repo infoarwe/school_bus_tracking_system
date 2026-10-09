@@ -341,7 +341,10 @@ func TestSuperAdmin2FAAndSchools(t *testing.T) {
 	// Deactivating a school locks out its users immediately.
 	e.user(&id, models.RoleSchoolAdmin, "admin@new.test", "")
 	adminTok := e.login("admin@new.test")
-	e.expect(e.do("PATCH", "/api/v1/schools/"+id+"/status", tok, map[string]string{"status": "inactive"}), 200, "")
+	// Critical action: needs the school code typed to confirm (S8-08).
+	e.expect(e.do("PATCH", "/api/v1/schools/"+id+"/status", tok, map[string]string{"status": "inactive"}), 400, "validation_failed")
+	e.expect(e.do("PATCH", "/api/v1/schools/"+id+"/status", tok, map[string]string{"status": "inactive", "confirm_code": "wrong"}), 400, "validation_failed")
+	e.expect(e.do("PATCH", "/api/v1/schools/"+id+"/status", tok, map[string]string{"status": "inactive", "confirm_code": "new-1"}), 200, "")
 	e.expect(e.do("GET", "/api/v1/auth/me", adminTok, nil), 403, "school_inactive")
 	e.expect(e.do("POST", "/api/v1/auth/login", "", map[string]string{"email": "admin@new.test", "password": testPassword}), 403, "school_inactive")
 }

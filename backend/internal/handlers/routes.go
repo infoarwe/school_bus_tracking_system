@@ -238,6 +238,14 @@ func (a *API) CreateStop(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, &req) {
 		return
 	}
+	if req.GeofenceRadiusM == nil {
+		s, err := store.GetTrackingSettings(r.Context(), a.Store.Pool, schoolID)
+		if err != nil {
+			internalError(w, r, err)
+			return
+		}
+		req.GeofenceRadiusM = &s.DefaultGeofenceM
+	}
 	in, errs := req.toInput()
 	if len(errs) > 0 {
 		httpx.ValidationError(w, errs)

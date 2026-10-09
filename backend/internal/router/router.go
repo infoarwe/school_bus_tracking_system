@@ -111,6 +111,7 @@ func New(d Deps) http.Handler {
 					r.Post("/notifications/read", a.MarkNotificationsRead)
 				})
 
+				r.With(superAdmin).Get("/audit-logs", a.PlatformAuditLogs)
 				r.With(superAdmin).Get("/schools", a.ListSchools)
 				r.With(superAdmin).Post("/schools", a.CreateSchool)
 
@@ -183,6 +184,13 @@ func New(d Deps) http.Handler {
 						r.Get("/trips/{tripID}", a.GetTrip)
 						r.Get("/trips/{tripID}/progress", a.TripProgress)
 						r.Post("/trips/{tripID}/delays", a.StaffReportDelay)
+						r.Get("/trips/{tripID}/track", a.TripTrack)
+
+						// Dashboard, reports, audit log (S8).
+						r.Get("/dashboard", a.Dashboard)
+						r.Get("/reports", a.ListReports)
+						r.Get("/reports/{report}", a.RunReport)
+						r.Get("/audit-logs", a.SchoolAuditLogs)
 
 						// Alerts, and announcements (whole-school ones: admins only, checked in the handler).
 						r.Get("/alerts", a.SchoolAlerts)

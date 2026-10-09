@@ -4,6 +4,7 @@ import ComingSoon from '../components/ComingSoon'
 import AccountPage from '../pages/AccountPage'
 import AlertsPage from '../pages/AlertsPage'
 import AnnouncementsPage from '../pages/AnnouncementsPage'
+import AuditLogsPage from '../pages/AuditLogsPage'
 import BusesPage from '../pages/BusesPage'
 import DashboardPage from '../pages/DashboardPage'
 import DriversPage from '../pages/DriversPage'
@@ -12,6 +13,7 @@ import LiveTrackingPage from '../pages/LiveTrackingPage'
 import LoginPage from '../pages/LoginPage'
 import NotFoundPage from '../pages/NotFoundPage'
 import ParentsPage from '../pages/ParentsPage'
+import ReportsPage from '../pages/ReportsPage'
 import RouteDetailPage from '../pages/RouteDetailPage'
 import RoutesPage from '../pages/RoutesPage'
 import SchoolsPage from '../pages/SchoolsPage'
@@ -39,6 +41,8 @@ const pages: Record<string, React.ReactNode> = {
   '/live': <LiveTrackingPage />,
   '/alerts': <AlertsPage />,
   '/announcements': <AnnouncementsPage />,
+  '/reports': <ReportsPage />,
+  '/audit-logs': <AuditLogsPage />,
 }
 
 const menuRoutes = menu.map((m) => {

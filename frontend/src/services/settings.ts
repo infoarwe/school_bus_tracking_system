@@ -25,6 +25,8 @@ export interface TrackingSettings {
   /** The school's location: destination of Morning Pickup ("School Reached"). */
   school_latitude: number | null
   school_longitude: number | null
+  /** Arrival radius used for new stops. */
+  default_geofence_m: number
 }
 
 export const trackingSettingsApi = {

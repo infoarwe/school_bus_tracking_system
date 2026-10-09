@@ -35,6 +35,8 @@ export default function LeafletRouteMap({
   onPick,
   picked,
   height = 480,
+  track,
+  bus,
 }: Props) {
   const path = useMemo(() => stops.map((s) => [s.latitude, s.longitude] as L.LatLngTuple), [stops])
 
@@ -45,7 +47,24 @@ export default function LeafletRouteMap({
       style={{ height, width: '100%', borderRadius: 8, cursor: onPick ? 'crosshair' : undefined }}
     >
       <TileLayer url={TILE_URL} attribution={ATTRIBUTION} />
-      <FitToPoints points={picked ? [...path, [picked.latitude, picked.longitude]] : path} />
+      <FitToPoints
+        points={
+          track?.length
+            ? track.map((p) => [p.lat, p.lng] as L.LatLngTuple)
+            : picked
+              ? [...path, [picked.latitude, picked.longitude]]
+              : path
+        }
+      />
+      {track && track.length > 1 && (
+        <Polyline
+          positions={track.map((p) => [p.lat, p.lng] as L.LatLngTuple)}
+          pathOptions={{ color: '#1677ff', weight: 3, opacity: 0.7 }}
+        />
+      )}
+      {bus && (
+        <Marker position={[bus.lat, bus.lng]} icon={numberIcon('🚌', true)} zIndexOffset={1000} />
+      )}
       {onPick && <ClickToPick onPick={onPick} />}
 
       {path.length > 1 && (

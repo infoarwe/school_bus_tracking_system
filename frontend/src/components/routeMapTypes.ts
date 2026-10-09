@@ -13,6 +13,10 @@ export interface RouteMapProps {
   onPick?: (lat: number, lng: number) => void
   picked?: PickedPoint | null
   height?: number
+  /** GPS trail to draw (trip replay). The map fits to it instead of the stops. */
+  track?: { lat: number; lng: number }[]
+  /** Bus position on the trail (trip replay). */
+  bus?: { lat: number; lng: number } | null
 }
 
 /** Centre of India, used before there is anything to show. */
