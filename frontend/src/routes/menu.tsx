@@ -46,5 +46,5 @@ export const menu: MenuEntry[] = [
   { path: '/audit-logs', label: 'Audit Logs', icon: <FileSearchOutlined />, sprint: 8, roles: ALL },
   { path: '/users', label: 'School Users', icon: <UserSwitchOutlined />, sprint: 1, roles: ADMINS },
   { path: '/schools', label: 'Schools', icon: <BankOutlined />, sprint: 1, roles: ['super_admin'] },
-  { path: '/settings', label: 'Settings', icon: <SettingOutlined />, sprint: 8, roles: ADMINS },
+  { path: '/settings', label: 'Settings', icon: <SettingOutlined />, sprint: 4, roles: ADMINS },
 ]

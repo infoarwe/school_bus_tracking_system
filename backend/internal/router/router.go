@@ -27,6 +27,8 @@ var (
 	userAdmins = middleware.RequireRoles(models.RoleSuperAdmin, models.RoleSchoolAdmin)
 	// Transport master data: Super Admin, School Admin and Transport Manager (permission matrix).
 	transportStaff = webRoles
+	// Students and parents: managed by Super Admin and School Admin; Transport Manager may only view.
+	studentAdmins = middleware.RequireRoles(models.RoleSuperAdmin, models.RoleSchoolAdmin)
 )
 
 func New(d Deps) http.Handler {
@@ -58,6 +60,9 @@ func New(d Deps) http.Handler {
 
 	a := d.API
 	r.Route("/api/v1", func(r chi.Router) {
+		// Live tracking WebSocket: authenticates itself (?access_token=), see handlers/ws.go.
+		r.Get("/ws", a.LiveSocket)
+
 		// Public: login flows.
 		r.Post("/auth/login", a.Login)
 		r.Post("/auth/login/2fa", a.Login2FA)
@@ -80,6 +85,26 @@ func New(d Deps) http.Handler {
 				r.Get("/auth/sessions", a.ListSessions)
 				r.Delete("/auth/sessions/{sessionID}", a.RevokeSession)
 
+				// Driver and Parent apps: scoped to the caller, no school ID in the path.
+				r.Route("/driver", func(r chi.Router) {
+					r.Use(middleware.RequireRoles(models.RoleDriver))
+					r.Get("/me", a.DriverMe)
+					r.Get("/trips", a.DriverTrips)
+					r.Get("/trips/{tripID}", a.DriverTrip)
+					r.Post("/trips/{tripID}/confirm", a.DriverConfirmTrip)
+					r.Post("/trips/{tripID}/start", a.DriverStartTrip)
+					r.Post("/trips/{tripID}/end", a.DriverEndTrip)
+					r.Post("/trips/{tripID}/locations", a.DriverPostLocations)
+					r.Get("/trips/{tripID}/progress", a.DriverTripProgress)
+				})
+				r.Route("/parent", func(r chi.Router) {
+					r.Use(middleware.RequireRoles(models.RoleParent))
+					r.Get("/children", a.ParentChildren)
+					r.Get("/children/{studentID}", a.ParentChild)
+					r.Get("/children/{studentID}/trips", a.ParentChildTrips)
+					r.Get("/children/{studentID}/live", a.ParentChildLive)
+				})
+
 				r.With(superAdmin).Get("/schools", a.ListSchools)
 				r.With(superAdmin).Post("/schools", a.CreateSchool)
 
@@ -91,6 +116,11 @@ func New(d Deps) http.Handler {
 					r.With(webRoles).Get("/", a.GetSchool)
 					r.With(superAdmin).Put("/", a.UpdateSchool)
 					r.With(superAdmin).Patch("/status", a.SetSchoolStatus)
+					r.With(webRoles).Get("/settings/maps", a.GetMapsSettings)
+					r.With(userAdmins).Put("/settings/maps", a.UpdateMapsSettings)
+					r.With(webRoles).Get("/settings/tracking", a.GetTrackingSettings)
+					r.With(userAdmins).Put("/settings/tracking", a.UpdateTrackingSettings)
+					r.With(webRoles).Get("/live", a.LiveSnapshot)
 
 					r.Route("/users", func(r chi.Router) {
 						r.Use(userAdmins)
@@ -126,6 +156,40 @@ func New(d Deps) http.Handler {
 						r.Put("/routes/{routeID}/stops/order", a.ReorderStops)
 						r.Put("/routes/{routeID}/stops/{stopID}", a.UpdateStop)
 						r.Delete("/routes/{routeID}/stops/{stopID}", a.DeleteStop)
+						r.Get("/routes/{routeID}/students", a.RouteStudents)
+
+						// Read-only for Transport Managers (student data limited to transport needs).
+						r.Get("/students", a.ListStudents)
+						r.Get("/students/classes", a.StudentClasses)
+						r.Get("/students/{studentID}", a.GetStudent)
+						r.Get("/students/{studentID}/assignments", a.StudentAssignmentHistory)
+						r.Get("/parents", a.ListParents)
+						r.Get("/parents/{parentID}", a.GetParent)
+
+						// Daily trip assignment: all three web roles (permission matrix).
+						r.Get("/trips", a.ListTrips)
+						r.Post("/trips", a.CreateTrip)
+						r.Post("/trips/copy", a.CopyTrips)
+						r.Get("/trips/{tripID}", a.GetTrip)
+						r.Get("/trips/{tripID}/progress", a.TripProgress)
+						r.Put("/trips/{tripID}", a.UpdateTrip)
+						r.Post("/trips/{tripID}/cancel", a.CancelTrip)
+						r.Post("/trips/{tripID}/override", a.OverrideTrip)
+					})
+
+					r.Group(func(r chi.Router) {
+						r.Use(studentAdmins)
+
+						r.Post("/students", a.CreateStudent)
+						r.Post("/students/import", a.ImportStudents)
+						r.Put("/students/{studentID}", a.UpdateStudent)
+						r.Patch("/students/{studentID}/status", a.SetStudentStatus)
+						r.Put("/students/{studentID}/assignment", a.AssignStudent)
+						r.Delete("/students/{studentID}/assignment", a.UnassignStudent)
+
+						r.Post("/parents", a.CreateParent)
+						r.Put("/parents/{parentID}", a.UpdateParent)
+						r.Patch("/parents/{parentID}/status", a.SetParentStatus)
 					})
 				})
 			})

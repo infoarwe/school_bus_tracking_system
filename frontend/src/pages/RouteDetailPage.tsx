@@ -18,6 +18,8 @@ import {
   Select,
   Space,
   Spin,
+  Table,
+  Tag,
   Typography,
 } from 'antd'
 import {
@@ -49,8 +51,9 @@ import RequireSchool from '../components/RequireSchool'
 import RouteMap from '../components/RouteMap'
 import StatusTag from '../components/StatusTag'
 import { ApiError } from '../services/api'
+import { studentsApi } from '../services/people'
 import { routesApi } from '../services/transport'
-import type { BusRoute, Stop, StopInput } from '../services/types'
+import type { BusRoute, RouteStudent, Stop, StopInput } from '../services/types'
 import { applyApiErrors, errorMessage } from '../utils/formErrors'
 import { RouteForm, TripTypeTags } from './RoutesPage'
 
@@ -74,15 +77,16 @@ function RouteDetail({ schoolId, routeId }: { schoolId: string; routeId: string 
   const [editingRoute, setEditingRoute] = useState(false)
   const [editingStop, setEditingStop] = useState<Stop | 'new' | null>(null)
   const [savingOrder, setSavingOrder] = useState(false)
+  const [students, setStudents] = useState<RouteStudent[]>([])
 
   useEffect(() => {
     let cancelled = false
-    routesApi
-      .get(schoolId, routeId)
-      .then((r) => {
+    Promise.all([routesApi.get(schoolId, routeId), studentsApi.routeStudents(schoolId, routeId)])
+      .then(([r, st]) => {
         if (cancelled) return
         setRoute(r)
         setStops(r.stops ?? [])
+        setStudents(st)
       })
       .catch((e: unknown) => {
         if (cancelled) return
@@ -212,6 +216,11 @@ function RouteDetail({ schoolId, routeId }: { schoolId: string; routeId: string 
                       <StopRow
                         key={s.id}
                         stop={s}
+                        studentCount={
+                          students.filter(
+                            (st) => st.pickup_stop_id === s.id || st.drop_stop_id === s.id,
+                          ).length
+                        }
                         selected={s.id === selected}
                         onSelect={() => setSelected(s.id === selected ? null : s.id)}
                         onEdit={() => setEditingStop(s)}
@@ -230,6 +239,12 @@ function RouteDetail({ schoolId, routeId }: { schoolId: string; routeId: string 
           </Card>
         </Col>
       </Row>
+
+      <RouteStudentsCard
+        students={students}
+        stops={stops}
+        selectedStop={stops.find((s) => s.id === selected) ?? null}
+      />
 
       {editingRoute && (
         <RouteForm
@@ -259,14 +274,70 @@ function RouteDetail({ schoolId, routeId }: { schoolId: string; routeId: string 
   )
 }
 
+function RouteStudentsCard({
+  students,
+  stops,
+  selectedStop,
+}: {
+  students: RouteStudent[]
+  stops: Stop[]
+  selectedStop: Stop | null
+}) {
+  const stopName = (id: string | null) => {
+    const s = stops.find((x) => x.id === id)
+    return s ? `${s.sequence}. ${s.name}` : '—'
+  }
+  const shown = selectedStop
+    ? students.filter(
+        (s) => s.pickup_stop_id === selectedStop.id || s.drop_stop_id === selectedStop.id,
+      )
+    : students
+  return (
+    <Card
+      title={
+        selectedStop
+          ? `Students at ${selectedStop.name} (${shown.length})`
+          : `Students on this route (${students.length})`
+      }
+      extra={
+        <Typography.Text type="secondary">
+          {selectedStop ? 'Click the stop again to show all.' : 'Click a stop to filter.'}
+        </Typography.Text>
+      }
+    >
+      <Table<RouteStudent>
+        rowKey="student_id"
+        size="small"
+        dataSource={shown}
+        pagination={{ pageSize: 20, hideOnSinglePage: true }}
+        scroll={{ x: 600 }}
+        locale={{ emptyText: 'No students assigned. Assign them on the Students page.' }}
+        columns={[
+          { title: 'Name', dataIndex: 'name' },
+          { title: 'Adm. no.', dataIndex: 'admission_no', width: 110 },
+          {
+            title: 'Class',
+            width: 90,
+            render: (_, s) => [s.class, s.section].filter(Boolean).join('-') || '—',
+          },
+          { title: 'Pickup stop', render: (_, s) => stopName(s.pickup_stop_id) },
+          { title: 'Drop stop', render: (_, s) => stopName(s.drop_stop_id) },
+        ]}
+      />
+    </Card>
+  )
+}
+
 function StopRow({
   stop,
+  studentCount,
   selected,
   onSelect,
   onEdit,
   onDelete,
 }: {
   stop: Stop
+  studentCount: number
   selected: boolean
   onSelect: () => void
   onEdit: () => void
@@ -307,6 +378,9 @@ function StopRow({
             .join(' · ') || 'No times set'}
         </Typography.Text>
       </div>
+      <Tag color={studentCount ? 'blue' : 'default'} title="Students using this stop">
+        {studentCount} student{studentCount === 1 ? '' : 's'}
+      </Tag>
       <Space size={0} onClick={(e) => e.stopPropagation()}>
         <Button
           type="text"
@@ -317,7 +391,11 @@ function StopRow({
         />
         <Popconfirm
           title={`Delete ${stop.name}?`}
-          description="Later stops move up one place."
+          description={
+            studentCount
+              ? `${studentCount} student(s) use this stop. Move them first.`
+              : 'Later stops move up one place.'
+          }
           onConfirm={onDelete}
         >
           <Button

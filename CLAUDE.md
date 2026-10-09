@@ -30,12 +30,13 @@ Chosen:
 - Backend libraries: chi router, go-redis v9, log/slog
 - Admin web: React 19 + TypeScript + Vite, Ant Design, React Router, axios, in `frontend/`
 - Push provider: FCM (planned for Sprint 7)
+- Android apps: Kotlin, built by the mobile team (not in this repo)
+- Maps & GPS: Google Maps, with **a different key per school** (Settings → Maps, `PUT /schools/{id}/settings/maps`). The browser key draws admin maps (`GoogleRouteMap`); a school without one falls back to Leaflet + OpenStreetMap (`LeafletRouteMap`); `RouteMap` picks. The server key is for ETA routing (Sprint 6): stored AES-GCM encrypted with `DATA_ENCRYPTION_KEY` (`internal/secrets`), never returned by the API or written to the audit log.
+- Deployment: Docker on Linux behind Nginx; monitoring with Prometheus + Grafana.
 
 Not yet decided (fill in when chosen):
-- Android language/framework: owned by the mobile team (not in this repo)
-- OTP/SMS provider: `TODO` (needed in Sprint 1, S1-03; stub until chosen)
-- Maps/routing provider: `TODO` for ETA routing (Sprint 6). Admin maps use Leaflet + OpenStreetMap tiles (free, no key); swap the tile URL in `frontend/src/components/RouteMap.tsx` for a paid provider before production traffic (OSM tile usage policy).
-- Hosting/deployment: `TODO`
+- OTP/SMS provider: `TODO` (dev uses a fixed OTP via `OTP_DEV_CODE`; real SMS needed before go-live)
+- Server/host for the shared dev environment (S2-13): `TODO`
 
 ## Repository layout
 
@@ -58,6 +59,7 @@ cd backend && cp .env.example .env         # first time only
 go run ./cmd/migrate up                    # also: down, status, redo
 go run ./cmd/seed                          # demo schools + users (idempotent; refuses in production)
 go run ./cmd/api                           # http://localhost:8085/health, API docs at /docs
+go run ./cmd/simulate -end                 # drive the demo bus along its route (needs OTP_DEV_CODE); see -h
 go vet ./... && go test ./...              # integration tests skip unless TEST_DATABASE_URL is set:
 TEST_DATABASE_URL='postgres://sbts:sbts@localhost:5433/sbts_test?sslmode=disable' go test -p 1 ./...
 cd frontend && npm install && npm run dev  # http://localhost:5180 (proxies /api, /health)
@@ -262,7 +264,21 @@ Advanced analytics, attendance automation and additional integrations. Do not bu
 - Driver mobiles are unique per role across all schools (one login identity per number).
 - Bus `vehicle_number` is unique per school ignoring spaces/hyphens/case.
 - Stops: `sequence` is always 1..N with no gaps (insert at position, delete renumbers, reorder takes the full ID list). Always call `store.LockRoute` first in the transaction. Geofence radius 25-1000 m, default 100.
-- Drivers, buses and routes are deactivated, never deleted (trip history references them). Stops can be deleted until Sprint 3 links students to them.
+- Drivers, buses and routes are deactivated, never deleted (trip history references them). A stop cannot be deleted while a current assignment uses it (409 `stop_in_use`).
+- A parent is a `parents` row plus a `users` row (role `parent`), same pattern as drivers; `parent_students` links them to students (father/mother/guardian). Inactive parent = suspended login.
+- Student assignment (`student_assignments`): one current row per student (`ended_at IS NULL`); changing it ends the old row (history). `validateAssignment` enforces rule 5: stops must belong to the route; pickup stop required iff the route runs Morning Pickup, drop stop iff Evening Drop. `transport_status = not_using` ends the assignment.
+- Students and parents: Super Admin and School Admin manage; Transport Manager is read-only and never receives `students.notes` (`transportView`).
+- App endpoints (`/api/v1/driver/...`, `/api/v1/parent/...`) look everything up from the caller's user ID; a parent only ever gets students linked to them (others are 404).
+- CSV import (`POST /students/import`) is all-or-nothing with a savepoint per row; `?dry_run=true` validates only.
+- Trips (`trips`): one row per Driver + Bus + Route + Date + Trip Type. Partial unique indexes (status <> cancelled) allow each route, bus and driver once per date + trip type; `trips_driver_started_key` allows one started trip per driver. Status flow: scheduled → confirmed (driver) → started (driver, only on `trip_date` in the school time zone) → completed; admins cancel open trips and can override (reason required). Every change goes through `changeTripStatus` (history + audit). "Today" is always `store.SchoolToday` (school time zone), never server time.
+- Live tracking (`internal/tracking`): `POST /driver/trips/{id}/locations` → `tracking.Filter` (drops accuracy > 100 m, jumps > 150 km/h, bad timestamps, duplicates) → history in `trip_locations` only if the school's `location_retention_days` > 0 → current position in Redis (`trip:{id}:loc`, `school:{id}:live`) → event on `school:{id}:events`. Every API instance runs a `Hub` that PSUBSCRIBEs and fans events out to its WebSocket clients. Publish trip status changes **after** the DB commit (`publishTripStatus`).
+- WebSocket `/api/v1/ws?access_token=`: `LoadPrincipal` on connect, `RecheckSession` every minute (close 4401). Subscriptions: `school` (staff only) or `trip` (`authorizeTripWatch`: staff → own school, driver → own trip, parent → `ParentCanSeeTrip`). Unauthorized trips answer `not_found`.
+- Stop detection (`tracking/progress.go`, pure and unit-tested): per trip, stops in travel order (Morning Pickup 1→N then the school as `stop_id "school"`; Evening Drop N→1). upcoming → approaching (within the school's `approach_distance_m`) → reached (inside the stop's geofence for 2 consecutive fixes) → crossed (outside radius + 30 m for 2 fixes). Fixes less accurate than max(radius, 50 m) neither count nor reset. Reaching one of the next 2 stops marks skipped ones crossed + `missed`. State lives in Redis (`trip:{id}:progress`); events go to `trip_stop_events` (unique per trip/stop/type) and out as `stop_status` + `progress` WebSocket events.
+- ETA (`tracking/eta.go`): Google Routes (school's encrypted server key, background refresh at most once a minute per trip, Redis lock, cached in `trip:{id}:google_eta`) when fresh; otherwise distance along remaining stops × 1.3 at the smoothed speed (clamped 4–15 m/s) + 45 s per stop. Never block a driver's upload on Google.
+- Parent tracking screen: `GET /parent/children/{id}/live` (trip, bus, child's stop status + ETA); then WebSocket `trip` subscription.
+- Background jobs (`internal/jobs`, run by every API instance): stale sweep every 30 s (`bus_stale` once per outage, per-school `stale_after_seconds`), GPS history retention hourly.
+- Tests use miniredis (no Redis server needed); WebSocket tests run against `httptest.NewServer`.
+- Drivers get per-stop student **counts** only, never student names (rule 7 / privacy). Parents get bus number and driver name, never the driver's mobile.
 
 ### Backend
 

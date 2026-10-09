@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -322,6 +323,13 @@ func (a *API) DeleteStop(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		inUse, err := store.CountStopAssignments(ctx, q, id)
+		if err != nil {
+			return err
+		}
+		if inUse > 0 {
+			return &stopInUseError{students: inUse}
+		}
 		if err := store.DeleteStop(ctx, q, schoolID, routeID, id); err != nil {
 			return err
 		}
@@ -329,12 +337,23 @@ func (a *API) DeleteStop(w http.ResponseWriter, r *http.Request) {
 			SchoolID: &schoolID, Action: "stop.delete", EntityType: "stop", EntityID: &id, Before: before,
 		})
 	})
+	var inUse *stopInUseError
+	if errors.As(err, &inUse) {
+		httpx.Error(w, http.StatusConflict, "stop_in_use", fmt.Sprintf(
+			"%d student(s) are assigned to this stop. Move them to another stop first.", inUse.students))
+		return
+	}
 	if err != nil {
 		storeError(w, r, err, nil)
 		return
 	}
 	httpx.NoContent(w)
 }
+
+// stopInUseError aborts a stop deletion while students are assigned to it.
+type stopInUseError struct{ students int }
+
+func (e *stopInUseError) Error() string { return "stop in use" }
 
 // ReorderStops takes every stop ID of the route in the new travel order.
 func (a *API) ReorderStops(w http.ResponseWriter, r *http.Request) {

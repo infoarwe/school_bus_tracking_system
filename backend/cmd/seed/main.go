@@ -112,6 +112,12 @@ func run() error {
 			if err := seedTransport(ctx, q, schoolID); err != nil {
 				return err
 			}
+			if err := seedStudents(ctx, q, schoolID); err != nil {
+				return err
+			}
+			if err := seedTodaysTrips(ctx, q, schoolID); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -144,6 +150,11 @@ func ensureUser(ctx context.Context, q store.DBTX, schoolID *string, u seedUser,
 // seedTransport adds the CLAUDE.md example: buses, a driver profile for the demo
 // driver login, and route RS-01 School → Gandhipuram → Peelamedu → Hope College → Singanallur.
 func seedTransport(ctx context.Context, q store.DBTX, schoolID string) error {
+	// The school sits just past the last stop: Morning Pickup ends there ("School Reached").
+	if _, err := q.Exec(ctx, `UPDATE schools SET latitude = 11.0050, longitude = 77.0450
+		WHERE id = $1 AND latitude IS NULL`, schoolID); err != nil {
+		return fmt.Errorf("seed school location: %w", err)
+	}
 	if _, err := q.Exec(ctx, `
 		INSERT INTO drivers (school_id, user_id, license_number)
 		SELECT school_id, id, 'TN3820190001234' FROM users
@@ -190,5 +201,78 @@ func seedTransport(ctx context.Context, q store.DBTX, schoolID string) error {
 		}
 	}
 	fmt.Println("  created buses, driver profile, route RS-01 with 4 stops")
+	return nil
+}
+
+// seedStudents adds three students on RS-01; the demo parent login has two of them.
+func seedStudents(ctx context.Context, q store.DBTX, schoolID string) error {
+	if _, err := q.Exec(ctx, `
+		INSERT INTO parents (school_id, user_id)
+		SELECT school_id, id FROM users WHERE school_id = $1 AND role = 'parent'
+		ON CONFLICT (user_id) DO NOTHING`, schoolID); err != nil {
+		return fmt.Errorf("seed parents: %w", err)
+	}
+	students := []struct {
+		admission, name, class, section, stop string
+		demoParentChild                       bool
+	}{
+		{"DPS-1001", "Asha Ravi", "5", "A", "Peelamedu", true},
+		{"DPS-1002", "Arjun Ravi", "2", "B", "Peelamedu", true},
+		{"DPS-1003", "Divya Kumar", "7", "A", "Hope College", false},
+	}
+	for _, st := range students {
+		var id string
+		err := q.QueryRow(ctx, `INSERT INTO students (school_id, admission_no, name, class, section)
+			VALUES ($1, $2, $3, $4, $5) ON CONFLICT (school_id, admission_no) DO NOTHING RETURNING id`,
+			schoolID, st.admission, st.name, st.class, st.section).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // already seeded
+		}
+		if err != nil {
+			return fmt.Errorf("seed student %s: %w", st.admission, err)
+		}
+		if _, err := q.Exec(ctx, `
+			INSERT INTO student_assignments (school_id, student_id, route_id, pickup_stop_id, drop_stop_id)
+			SELECT $1, $2, r.id, s.id, s.id FROM routes r JOIN stops s ON s.route_id = r.id
+			WHERE r.school_id = $1 AND r.code = 'RS-01' AND s.name = $3`, schoolID, id, st.stop); err != nil {
+			return fmt.Errorf("seed assignment %s: %w", st.admission, err)
+		}
+		if st.demoParentChild {
+			if _, err := q.Exec(ctx, `
+				INSERT INTO parent_students (parent_id, student_id, school_id, relationship)
+				SELECT p.id, $2, $1, 'father' FROM parents p JOIN users u ON u.id = p.user_id
+				WHERE p.school_id = $1 AND u.mobile = '+919000000002'`, schoolID, id); err != nil {
+				return fmt.Errorf("seed parent link %s: %w", st.admission, err)
+			}
+		}
+		fmt.Printf("  created student %s %s\n", st.admission, st.name)
+	}
+	return nil
+}
+
+// seedTodaysTrips assigns today's RS-01 Morning Pickup and Evening Drop to the demo
+// driver and bus (the CLAUDE.md example). Re-running the seed on another day adds that day's trips.
+func seedTodaysTrips(ctx context.Context, q store.DBTX, schoolID string) error {
+	tag, err := q.Exec(ctx, `
+		INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id)
+		SELECT s.id, (now() AT TIME ZONE s.timezone)::date, tt.trip_type, r.id, b.id, d.id
+		FROM schools s
+		JOIN routes r ON r.school_id = s.id AND r.code = 'RS-01'
+		JOIN buses b ON b.school_id = s.id AND b.vehicle_number = 'TN-38-AB-1234'
+		JOIN drivers d ON d.school_id = s.id
+		JOIN users u ON u.id = d.user_id AND u.mobile = '+919000000001'
+		CROSS JOIN (VALUES ('morning_pickup'), ('evening_drop')) AS tt(trip_type)
+		WHERE s.id = $1
+		ON CONFLICT DO NOTHING`, schoolID)
+	if err != nil {
+		return fmt.Errorf("seed trips: %w", err)
+	}
+	if _, err := q.Exec(ctx, `
+		INSERT INTO trip_status_history (trip_id, school_id, to_status, reason)
+		SELECT t.id, t.school_id, 'scheduled', 'seed' FROM trips t
+		WHERE t.school_id = $1 AND NOT EXISTS (SELECT 1 FROM trip_status_history h WHERE h.trip_id = t.id)`, schoolID); err != nil {
+		return fmt.Errorf("seed trip history: %w", err)
+	}
+	fmt.Printf("  today's trips added: %d\n", tag.RowsAffected())
 	return nil
 }

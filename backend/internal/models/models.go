@@ -144,3 +144,137 @@ type Stop struct {
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
+
+const (
+	TransportUses    = "uses_transport"
+	TransportNotUsed = "not_using"
+)
+
+type Student struct {
+	ID              string  `json:"id"`
+	SchoolID        string  `json:"school_id"`
+	AdmissionNo     string  `json:"admission_no"`
+	Name            string  `json:"name"`
+	Class           string  `json:"class"`
+	Section         string  `json:"section"`
+	Notes           *string `json:"notes,omitempty"` // nil for Transport Managers (transport-only view)
+	Status          string  `json:"status"`
+	TransportStatus string  `json:"transport_status"`
+	// Current route/stop assignment, or null if not assigned.
+	Assignment *StudentAssignment `json:"assignment"`
+	// Linked parents; only on GET of a single student.
+	Parents   []ParentLink `json:"parents,omitempty"`
+	CreatedAt time.Time    `json:"created_at"`
+	UpdatedAt time.Time    `json:"updated_at"`
+}
+
+// StopRef is the part of a stop shown alongside an assignment.
+type StopRef struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Sequence   int     `json:"sequence"`
+	Latitude   float64 `json:"latitude"`
+	Longitude  float64 `json:"longitude"`
+	PickupTime *string `json:"pickup_time"`
+	DropTime   *string `json:"drop_time"`
+}
+
+type StudentAssignment struct {
+	ID             string     `json:"id"`
+	RouteID        string     `json:"route_id"`
+	RouteCode      string     `json:"route_code"`
+	RouteName      string     `json:"route_name"`
+	PickupStop     *StopRef   `json:"pickup_stop"`
+	DropStop       *StopRef   `json:"drop_stop"`
+	AssignedByName *string    `json:"assigned_by_name"`
+	AssignedAt     time.Time  `json:"assigned_at"`
+	EndedAt        *time.Time `json:"ended_at"`
+}
+
+type ParentLink struct {
+	ParentID     string `json:"parent_id"`
+	Name         string `json:"name"`
+	Mobile       string `json:"mobile"`
+	Relationship string `json:"relationship"`
+}
+
+type ChildLink struct {
+	StudentID    string `json:"student_id"`
+	Name         string `json:"name"`
+	AdmissionNo  string `json:"admission_no"`
+	Class        string `json:"class"`
+	Section      string `json:"section"`
+	Relationship string `json:"relationship"`
+}
+
+// Parent joins the parents row with its login user (name, mobile, last login).
+type Parent struct {
+	ID              string      `json:"id"`
+	SchoolID        string      `json:"school_id"`
+	UserID          string      `json:"user_id"`
+	Name            string      `json:"name"`
+	Mobile          string      `json:"mobile"`
+	AlternateMobile string      `json:"alternate_mobile"`
+	Email           string      `json:"email"`
+	Address         string      `json:"address"`
+	Status          string      `json:"status"`
+	LastLoginAt     *time.Time  `json:"last_login_at"`
+	Children        []ChildLink `json:"children"`
+	CreatedAt       time.Time   `json:"created_at"`
+	UpdatedAt       time.Time   `json:"updated_at"`
+}
+
+const (
+	TripMorningPickup = "morning_pickup"
+	TripEveningDrop   = "evening_drop"
+
+	TripScheduled = "scheduled"
+	TripConfirmed = "confirmed"
+	TripStarted   = "started"
+	TripCompleted = "completed"
+	TripCancelled = "cancelled"
+)
+
+// Trip is one daily assignment: Driver + Bus + Route + Date + Trip Type.
+type Trip struct {
+	ID       string `json:"id"`
+	SchoolID string `json:"school_id"`
+	TripDate string `json:"trip_date"` // YYYY-MM-DD in the school's time zone
+	TripType string `json:"trip_type"` // morning_pickup | evening_drop
+	Status   string `json:"status"`
+	Route    struct {
+		ID        string `json:"id"`
+		Code      string `json:"code"`
+		Name      string `json:"name"`
+		StopCount int    `json:"stop_count"`
+	} `json:"route"`
+	Bus struct {
+		ID            string `json:"id"`
+		VehicleNumber string `json:"vehicle_number"`
+		Capacity      int    `json:"capacity"`
+	} `json:"bus"`
+	Driver struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Mobile string `json:"mobile"`
+	} `json:"driver"`
+	// Students assigned to the route with a stop for this trip type.
+	StudentCount int        `json:"student_count"`
+	Notes        string     `json:"notes"`
+	CancelReason string     `json:"cancel_reason"`
+	ConfirmedAt  *time.Time `json:"confirmed_at"`
+	StartedAt    *time.Time `json:"started_at"`
+	EndedAt      *time.Time `json:"ended_at"`
+	CancelledAt  *time.Time `json:"cancelled_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type TripStatusChange struct {
+	FromStatus    *string   `json:"from_status"`
+	ToStatus      string    `json:"to_status"`
+	ChangedByName *string   `json:"changed_by_name"`
+	ChangedByRole string    `json:"changed_by_role"`
+	Reason        string    `json:"reason"`
+	CreatedAt     time.Time `json:"created_at"`
+}

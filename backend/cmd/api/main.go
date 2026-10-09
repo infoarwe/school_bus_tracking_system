@@ -4,8 +4,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,8 +18,11 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/config"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/database"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/handlers"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/jobs"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/router"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/tracking"
 )
 
 func main() {
@@ -55,6 +60,18 @@ func run() error {
 	}
 	defer rdb.Close()
 
+	st := store.New(db)
+	box, err := secrets.New(cfg.DataEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("DATA_ENCRYPTION_KEY: %w", err)
+	}
+
+	live := tracking.NewLive(rdb)
+	hub := tracking.NewHub(live)
+	go hub.Run(ctx)
+	go jobs.StaleSweep(ctx, st, live, 30*time.Second)
+	go jobs.LocationRetention(ctx, st, time.Hour)
+
 	handler := router.New(router.Deps{
 		CORSOrigins: cfg.CORSOrigins,
 		Health: &handlers.HealthHandler{Checks: map[string]handlers.Pinger{
@@ -62,9 +79,14 @@ func run() error {
 			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		}},
 		API: &handlers.API{
-			Store:                store.New(db),
+			Store:                st,
 			Tokens:               auth.NewTokenManager(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL),
 			SMS:                  auth.LogSender{}, // TODO(S0-03): real SMS provider
+			Secrets:              box,
+			Live:                 live,
+			Hub:                  hub,
+			ETA:                  tracking.NewGoogleRoutes(),
+			WSOriginPatterns:     originHosts(cfg.CORSOrigins),
 			OTPTTL:               cfg.OTPTTL,
 			OTPDevCode:           cfg.OTPDevCode,
 			RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
@@ -98,6 +120,18 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// originHosts turns CORS origins ("http://localhost:5180") into WebSocket origin
+// patterns ("localhost:5180"). The apps send no Origin header and are always allowed.
+func originHosts(origins []string) []string {
+	out := make([]string, 0, len(origins))
+	for _, o := range origins {
+		if u, err := url.Parse(o); err == nil && u.Host != "" {
+			out = append(out, u.Host)
+		}
+	}
+	return out
 }
 
 func setupLogger(cfg *config.Config) {

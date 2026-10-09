@@ -1,0 +1,35 @@
+import { getData, send } from './api'
+
+export interface MapsSettings {
+  /** Loads Google Maps in the admin web. Empty = OpenStreetMap is used. */
+  browser_key: string
+  /** The server key itself is never returned. */
+  server_key_set: boolean
+  server_key_hint: string
+}
+
+export const settingsApi = {
+  getMaps: (schoolId: string) => getData<MapsSettings>(`/api/v1/schools/${schoolId}/settings/maps`),
+  /** server_key: undefined keeps the stored key, '' removes it. */
+  updateMaps: (schoolId: string, body: { browser_key: string; server_key?: string }) =>
+    send<MapsSettings>('put', `/api/v1/schools/${schoolId}/settings/maps`, body),
+}
+
+export interface TrackingSettings {
+  /** Days of GPS history to keep; 0 keeps none (live tracking still works). */
+  location_retention_days: number
+  /** A bus with no GPS for this long is shown as offline. */
+  stale_after_seconds: number
+  /** "Approaching" fires within this distance of the next stop. */
+  approach_distance_m: number
+  /** The school's location: destination of Morning Pickup ("School Reached"). */
+  school_latitude: number | null
+  school_longitude: number | null
+}
+
+export const trackingSettingsApi = {
+  get: (schoolId: string) =>
+    getData<TrackingSettings>(`/api/v1/schools/${schoolId}/settings/tracking`),
+  update: (schoolId: string, body: TrackingSettings) =>
+    send<TrackingSettings>('put', `/api/v1/schools/${schoolId}/settings/tracking`, body),
+}

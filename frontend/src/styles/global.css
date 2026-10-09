@@ -94,3 +94,26 @@ body {
   display: flex;
   flex-direction: column;
 }
+
+/* Cancelled trips stay visible but muted */
+.row-muted td {
+  opacity: 0.55;
+}
+
+/* Live bus markers (OpenStreetMap) */
+.bus-marker span {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.bus-marker--selected span {
+  border-color: #1677ff;
+  transform: scale(1.15);
+}

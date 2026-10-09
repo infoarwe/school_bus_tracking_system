@@ -12,18 +12,23 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/auth"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/database"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/handlers"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/models"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/router"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/tracking"
 )
 
 const (
@@ -32,9 +37,20 @@ const (
 )
 
 type env struct {
-	t    *testing.T
-	srv  http.Handler
-	pool *pgxpool.Pool
+	t     *testing.T
+	srv   http.Handler
+	pool  *pgxpool.Pool
+	live  *tracking.Live
+	redis *miniredis.Miniredis
+	eta   *fakeETA
+}
+
+func testSecrets(t *testing.T) *secrets.Box {
+	b, err := secrets.New(strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func newEnv(t *testing.T) *env {
@@ -56,6 +72,17 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 
+	// Redis in memory: no server needed for tests.
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	live := tracking.NewLive(rdb)
+	hub := tracking.NewHub(live)
+	hubCtx, stopHub := context.WithCancel(context.Background())
+	t.Cleanup(stopHub)
+	go hub.Run(hubCtx)
+
+	eta := &fakeETA{}
 	srv := router.New(router.Deps{
 		Health: &handlers.HealthHandler{},
 		API: &handlers.API{
@@ -64,11 +91,15 @@ func newEnv(t *testing.T) *env {
 			SMS:                  auth.LogSender{},
 			OTPTTL:               5 * time.Minute,
 			OTPDevCode:           devOTP,
+			Secrets:              testSecrets(t),
+			Live:                 live,
+			Hub:                  hub,
+			ETA:                  eta,
 			RequireSuperAdmin2FA: true,
 		},
 		RequireSuperAdmin2FA: true,
 	})
-	return &env{t: t, srv: srv, pool: pool}
+	return &env{t: t, srv: srv, pool: pool, live: live, redis: mr, eta: eta}
 }
 
 type resp struct {

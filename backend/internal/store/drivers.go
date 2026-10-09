@@ -110,3 +110,8 @@ func SetDriverStatus(ctx context.Context, q DBTX, schoolID, id, status string) e
 	}
 	return nil
 }
+
+// GetDriverByUser finds the driver profile behind a driver login.
+func GetDriverByUser(ctx context.Context, q DBTX, userID string) (*models.Driver, error) {
+	return scanDriver(q.QueryRow(ctx, driverSelect+` WHERE d.user_id = $1`, userID))
+}

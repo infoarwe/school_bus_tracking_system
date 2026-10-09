@@ -5,11 +5,17 @@ import AccountPage from '../pages/AccountPage'
 import BusesPage from '../pages/BusesPage'
 import DashboardPage from '../pages/DashboardPage'
 import DriversPage from '../pages/DriversPage'
+import LiveTrackingPage from '../pages/LiveTrackingPage'
 import LoginPage from '../pages/LoginPage'
 import NotFoundPage from '../pages/NotFoundPage'
+import ParentsPage from '../pages/ParentsPage'
 import RouteDetailPage from '../pages/RouteDetailPage'
 import RoutesPage from '../pages/RoutesPage'
 import SchoolsPage from '../pages/SchoolsPage'
+import SettingsPage from '../pages/SettingsPage'
+import StudentImportPage from '../pages/StudentImportPage'
+import StudentsPage from '../pages/StudentsPage'
+import TripsPage from '../pages/TripsPage'
 import TwoFactorSetupPage from '../pages/TwoFactorSetupPage'
 import UsersPage from '../pages/UsersPage'
 import { RequireAuth, RoleGate } from './guards'
@@ -23,6 +29,11 @@ const pages: Record<string, React.ReactNode> = {
   '/drivers': <DriversPage />,
   '/buses': <BusesPage />,
   '/routes': <RoutesPage />,
+  '/students': <StudentsPage />,
+  '/parents': <ParentsPage />,
+  '/settings': <SettingsPage />,
+  '/trips': <TripsPage />,
+  '/live': <LiveTrackingPage />,
 }
 
 const menuRoutes = menu.map((m) => {
@@ -58,6 +69,14 @@ export const router = createBrowserRouter([
         element: (
           <RoleGate roles={['super_admin', 'school_admin', 'transport_manager']}>
             <RouteDetailPage />
+          </RoleGate>
+        ),
+      },
+      {
+        path: 'students/import',
+        element: (
+          <RoleGate roles={['super_admin', 'school_admin']}>
+            <StudentImportPage />
           </RoleGate>
         ),
       },

@@ -14,7 +14,9 @@ import (
 
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/auth"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/httpx"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/tracking"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/validate"
 )
 
@@ -23,6 +25,15 @@ type API struct {
 	Store  *store.Store
 	Tokens *auth.TokenManager
 	SMS    auth.SMSSender
+	// Secrets encrypts stored third-party keys (per-school Google Maps server key).
+	Secrets *secrets.Box
+	// Live is the current bus positions and live events (Redis); Hub fans events out to WebSockets.
+	Live *tracking.Live
+	Hub  *tracking.Hub
+	// ETA computes Google ETAs with each school's server key; nil disables Google (estimate only).
+	ETA ETAProvider
+	// WSOriginPatterns are the browser origins allowed to open the WebSocket (host[:port]).
+	WSOriginPatterns []string
 
 	OTPTTL     time.Duration
 	OTPDevCode string
@@ -98,8 +109,12 @@ func storeError(w http.ResponseWriter, r *http.Request, err error, conflicts map
 }
 
 func internalError(w http.ResponseWriter, r *http.Request, err error) {
-	slog.Error("request failed", "request_id", chimw.GetReqID(r.Context()), "path", r.URL.Path, "err", err)
+	internalErrorLog(r, err)
 	httpx.Error(w, http.StatusInternalServerError, "internal_error", "Something went wrong.")
+}
+
+func internalErrorLog(r *http.Request, err error) {
+	slog.Error("request failed", "request_id", chimw.GetReqID(r.Context()), "path", r.URL.Path, "err", err)
 }
 
 // listFilter reads the common ?q= and ?status= list parameters.

@@ -27,6 +27,10 @@ type Config struct {
 	OTPTTL               time.Duration
 	OTPDevCode           string // fixed OTP for dev/testing; refused in production
 	RequireSuperAdmin2FA bool
+
+	// DataEncryptionKey (64 hex chars) encrypts stored third-party secrets such as
+	// each school's Google Maps server key. Changing it makes stored secrets unreadable.
+	DataEncryptionKey string
 }
 
 func Load() (*Config, error) {
@@ -67,6 +71,7 @@ func Load() (*Config, error) {
 		OTPTTL:               duration("OTP_TTL", "5m"),
 		OTPDevCode:           get("OTP_DEV_CODE", ""),
 		RequireSuperAdmin2FA: boolean("REQUIRE_SUPER_ADMIN_2FA", true),
+		DataEncryptionKey:    get("DATA_ENCRYPTION_KEY", ""),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -85,6 +90,12 @@ func Load() (*Config, error) {
 func (c *Config) ValidateForAPI() error {
 	if len(c.JWTSecret) < 32 {
 		return fmt.Errorf("config: JWT_SECRET must be at least 32 characters")
+	}
+	if len(c.DataEncryptionKey) != 64 {
+		return fmt.Errorf("config: DATA_ENCRYPTION_KEY must be 64 hex characters (generate with: openssl rand -hex 32)")
+	}
+	if c.IsProduction() && c.DataEncryptionKey == strings.Repeat("0", 64) {
+		return fmt.Errorf("config: set a real DATA_ENCRYPTION_KEY in production")
 	}
 	if c.IsProduction() && c.OTPDevCode != "" {
 		return fmt.Errorf("config: OTP_DEV_CODE must not be set in production")

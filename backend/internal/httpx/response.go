@@ -63,3 +63,8 @@ func write(w http.ResponseWriter, status int, body any) {
 		slog.Error("write json response", "err", err)
 	}
 }
+
+// JSONWithMeta is a list response with extra meta fields (e.g. an unread count).
+func JSONWithMeta(w http.ResponseWriter, data any, meta map[string]any) {
+	write(w, http.StatusOK, map[string]any{"data": data, "meta": meta})
+}

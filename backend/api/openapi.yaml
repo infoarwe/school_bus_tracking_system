@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.3.0
+  version: 0.7.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -25,6 +25,64 @@ info:
       latest one. If refresh fails, send the user to login.
     - Refresh tokens last 30 days. Store them in secure storage (Android Keystore / EncryptedSharedPreferences).
 
+    ## Live tracking (Driver app → server → Parent app / admin web)
+
+    ### Driver app: sending GPS
+    - After a successful `POST /driver/trips/{id}/start`, run a foreground location service and send fixes to
+      `POST /driver/trips/{id}/locations` in batches (`points`, 1–100). Every 5–10 s is enough.
+    - Send `latitude`, `longitude`, `accuracy_m`, `recorded_at` (device time, RFC 3339 UTC) and, when available,
+      `speed_mps` and `heading`.
+    - **Offline:** keep points in a local queue and send them oldest first when the network returns. Re-sending
+      points the server already has is harmless (they are rejected as duplicates).
+    - The server drops implausible fixes (accuracy worse than 100 m, jumps faster than 150 km/h, future or >6 h old
+      timestamps) and lists them in `rejected`; do not retry rejected points.
+    - `409 trip_not_started`: the trip was ended or cancelled (possibly by the school). **Stop the location service.**
+    - `503 live_unavailable`: keep the points queued and retry with back-off.
+    - Stop sending after `POST /driver/trips/{id}/end`. GPS is only accepted while a trip is in progress.
+
+    ### WebSocket: receiving live updates
+    Connect to `wss://<host>/api/v1/ws?access_token=<access token>` (a Super Admin also adds `&school_id=`).
+    A bad or expired token fails the handshake with HTTP 401: refresh the token and reconnect.
+
+    Send JSON text messages:
+
+    | Message | Who | Effect |
+    |---|---|---|
+    | `{"type":"subscribe","channel":"trip","trip_id":"…"}` | Parent (a trip their child rides), Driver (own trip), staff (own school) | Events for that trip |
+    | `{"type":"subscribe","channel":"school"}` | Staff only | Events for every trip of the school |
+    | `{"type":"unsubscribe","channel":"trip","trip_id":"…"}` | | Stop |
+    | `{"type":"ping"}` | | Server replies `{"type":"pong"}` |
+
+    Replies and events:
+    - `{"type":"subscribed","channel":"trip","trip_id":"…","status":"started","snapshot":[BusLocation]}`
+      (`snapshot` holds the latest position, if any; for `school` it holds every bus in progress).
+    - `{"type":"location","trip_id":"…","location":BusLocation}`: new position.
+    - `{"type":"trip_status","trip_id":"…","status":"started|completed|cancelled|…"}`: refresh the trip.
+    - `{"type":"bus_stale","trip_id":"…","location":BusLocation}`: no GPS for longer than the school's limit
+      (show "last seen …"); the next `location` has `stale: false`.
+    - `{"type":"error","code":"forbidden|not_found|bad_request","message":"…"}`: a trip the caller may not
+      watch is always `not_found`.
+
+    The server pings every 25 s and re-checks the session every minute; a session that was logged out or
+    suspended is closed with close code **4401**: log in again. On any other disconnect, reconnect with back-off
+    (1 s, 2 s, 4 s … max 30 s) and subscribe again. The Parent app should subscribe to the trip from
+    `GET /parent/children/{id}/trips` whose status is `started`.
+
+    ### Stop status and ETA (computed by the server from GPS)
+    - Each stop of a trip in progress is `upcoming` → `approaching` (bus within the school's approach distance,
+      default 1 km) → `reached` (bus inside the stop's circle for 2 fixes in a row) → `crossed` (left the circle).
+      A stop the bus passes without entering is `crossed` with `missed: true`. Apps never set these.
+    - **Order:** Morning Pickup visits stops 1 → N and then the school (`stop_id: "school"`, event `school_reached`);
+      Evening Drop runs N → 1.
+    - **ETA** (`eta_seconds`, `distance_m`) is from the bus's current position to each stop ahead (rule 9): Google
+      traffic-aware when the school has set its Google server key, otherwise an estimate (`eta_source`).
+    - **Parent app:** call `GET /parent/children/{id}/live` when opening the tracking screen (and when switching
+      child), then subscribe to `trip.id` on the WebSocket and update from `location` and `progress` events (find
+      the child's `child_stop.stop_id` in `progress.stops`). On `trip_status`, call `/live` again.
+    - Extra WebSocket events: `{"type":"stop_status","trip_id":"…","stop":{"stop_id","type","missed","at"}}`
+      when a stop changes, and `{"type":"progress","trip_id":"…","progress":TripProgress}` after every location.
+      Example display: `Bus: TN-38-AB-1234 | Status: Moving | ETA: 8 minutes | Distance: 2.4 km`.
+
     ## Error codes you should handle
     | Code | Status | Meaning |
     |---|---|---|
@@ -38,8 +96,20 @@ info:
     | `not_found` | 404 | Missing or belongs to another school. |
     | `conflict` | 409 | Duplicate; see `fields`. |
     | `otp_too_soon`, `otp_rate_limited` | 429 | Wait before requesting another code. |
+    | `invalid_transition`, `not_trip_day`, `another_trip_in_progress`, `status_changed` | 409 | Trip action not allowed now; refresh the trip. |
+    | `driver_profile_missing` | 404 | Driver login has no driver profile; contact the school. |
+    | `trip_not_started` | 409 | Stop sending GPS: the trip is not in progress. |
+    | `live_unavailable` | 503 | Keep GPS points queued and retry. |
 
     ## Changelog
+    - 0.7.0 (Sprint 6): **mobile handoff 5**: `GET /parent/children/{id}/live`; WebSocket `stop_status` and `progress` events;
+      `GET /driver/trips/{id}/progress`. Admin: trip progress, approach distance and school location in tracking settings.
+    - 0.6.0 (Sprint 5): **mobile handoff 4**: `POST /driver/trips/{id}/locations`, WebSocket `/api/v1/ws` (see Live tracking).
+      Admin: live snapshot, tracking settings (GPS history retention, offline threshold).
+    - 0.5.0 (Sprint 4): **mobile handoff 3**: `GET /driver/trips`, `GET /driver/trips/{id}`, `POST .../confirm|start|end`;
+      Parent app: `GET /parent/children/{id}/trips`. Admin: daily trips, copy, cancel, override; per-school maps keys.
+    - 0.4.0 (Sprint 3): **mobile handoff 2**: `GET /driver/me`, `GET /parent/children`, `GET /parent/children/{id}`.
+      Admin: students, parents, route/stop assignment with history, CSV import.
     - 0.3.0 (Sprint 2): drivers, buses, routes, stops (admin web).
     - 0.2.0 (Sprint 1): auth (password, 2FA, OTP, refresh, logout, me, sessions), schools, school users.
     - 0.1.0: `/health`.
@@ -57,6 +127,17 @@ tags:
   - name: Buses
   - name: Routes & stops
     description: Routes with ordered stops. Stop sequence is always 1..N.
+  - name: Driver app
+    description: Caller-scoped endpoints for the Driver app.
+  - name: Parent app
+    description: Caller-scoped endpoints for the Parent app. Only linked children are ever returned.
+  - name: Students
+  - name: Parents
+  - name: Trips
+    description: Daily assignments (Driver + Bus + Route + Date + Trip Type).
+  - name: Live tracking
+    description: Current bus positions and the WebSocket.
+  - name: Settings
   - name: System
 security:
   - bearerAuth: []
@@ -980,6 +1061,974 @@ paths:
         "204": { description: Deleted. }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/driver/me:
+    get:
+      tags: [Driver app]
+      summary: My driver profile
+      description: |
+        The logged-in driver's own profile. Today's trips, bus and route come with the trip endpoints (Sprint 4).
+        `404 driver_profile_missing` means the login exists but the school has not set up the driver profile.
+      operationId: getDriverMe
+      responses:
+        "200":
+          description: The driver.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Driver" } } }
+              example:
+                data:
+                  id: 3c1e0000-0000-4000-8000-000000000010
+                  school_id: 4f1d2a3b-0000-4000-8000-000000000002
+                  user_id: 9b6c1c2e-0000-4000-8000-000000000001
+                  name: Kumar
+                  mobile: "+919000000001"
+                  license_number: TN3820190001234
+                  license_expiry: "2030-01-31"
+                  address: ""
+                  emergency_contact_name: ""
+                  emergency_contact_phone: ""
+                  id_proof_type: ""
+                  id_proof_number: ""
+                  notes: ""
+                  status: active
+                  last_login_at: "2026-10-07T01:30:00Z"
+                  created_at: "2026-10-01T09:00:00Z"
+                  updated_at: "2026-10-01T09:00:00Z"
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/parent/children:
+    get:
+      tags: [Parent app]
+      summary: My children
+      description: |
+        Active students linked to the logged-in parent, each with their current route and stops
+        (`assignment` is null if the school has not assigned a route yet). Show this list after login;
+        switching child should reload everything for that child.
+      operationId: listParentChildren
+      responses:
+        "200":
+          description: Linked children, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/ParentChild" } }
+              example:
+                data:
+                  - student_id: 7a2b0000-0000-4000-8000-000000000020
+                    name: Asha Ravi
+                    admission_no: DPS-1001
+                    class: "5"
+                    section: A
+                    assignment:
+                      id: 1d000000-0000-4000-8000-000000000030
+                      route_id: 5e000000-0000-4000-8000-000000000040
+                      route_code: RS-01
+                      route_name: Gandhipuram - Singanallur
+                      pickup_stop: { id: 6f000000-0000-4000-8000-000000000050, name: Peelamedu, sequence: 2, latitude: 11.0285, longitude: 77.0028, pickup_time: "07:25", drop_time: "16:25" }
+                      drop_stop: { id: 6f000000-0000-4000-8000-000000000050, name: Peelamedu, sequence: 2, latitude: 11.0285, longitude: 77.0028, pickup_time: "07:25", drop_time: "16:25" }
+                      assigned_by_name: Demo School Admin
+                      assigned_at: "2026-10-01T09:00:00Z"
+                      ended_at: null
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/parent/children/{studentID}:
+    parameters:
+      - { $ref: "#/components/parameters/StudentID" }
+    get:
+      tags: [Parent app]
+      summary: One child, with their route's stops
+      description: |
+        Same as the list entry plus `route_stops`: all stops of the child's route in travel order, to draw the route
+        on the map. A student not linked to this parent returns 404.
+      operationId: getParentChild
+      responses:
+        "200":
+          description: The child.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    allOf:
+                      - $ref: "#/components/schemas/ParentChild"
+                      - type: object
+                        required: [route_stops]
+                        properties:
+                          route_stops: { type: array, items: { $ref: "#/components/schemas/Stop" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/students:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Students]
+      summary: List students (Transport Manager may view)
+      description: Each student includes the current `assignment`. Transport Managers do not receive `notes`.
+      operationId: listStudents
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: q, in: query, description: Search name or admission number, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+        - { name: transport_status, in: query, schema: { type: string, enum: [uses_transport, not_using] } }
+        - { name: class, in: query, schema: { type: string } }
+        - { name: section, in: query, schema: { type: string } }
+        - { name: route_id, in: query, schema: { type: string, format: uuid } }
+        - { name: assigned, in: query, description: Only students with (yes) or without (no) a route, schema: { type: string, enum: ["yes", "no"] } }
+      responses:
+        "200":
+          description: Students, by class, section, name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Student" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+    post:
+      tags: [Students]
+      summary: Create a student (Super Admin, School Admin)
+      operationId: createStudent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StudentInput" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Student" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/students/classes:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Students]
+      summary: Distinct class values (for filters)
+      operationId: listStudentClasses
+      responses:
+        "200":
+          description: Classes in use.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { type: array, items: { type: string } } } }
+
+  /api/v1/schools/{schoolID}/students/import:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    post:
+      tags: [Students]
+      summary: Import students and parents from CSV (Super Admin, School Admin)
+      description: |
+        Columns (header row, any order, case-insensitive): `admission_no`*, `student_name`*, `class`, `section`,
+        `parent_name`, `parent_mobile`, `parent_relationship`, `parent2_name`, `parent2_mobile`, `parent2_relationship`,
+        `route_code`, `pickup_stop`, `drop_stop`. Stops are matched by name or stop number. Max 2000 rows / 2 MB.
+
+        **All or nothing:** if any row has an error nothing is saved and every error is returned.
+        Existing students (same admission number) are updated; parents are matched by mobile.
+      operationId: importStudents
+      parameters:
+        - { name: dry_run, in: query, description: Validate only, schema: { type: boolean, default: false } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "200":
+          description: Result. `imported` is true only if the data was saved.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/ImportResult" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/schools/{schoolID}/students/{studentID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/StudentID" }
+    get:
+      tags: [Students]
+      summary: Get a student with linked parents
+      operationId: getStudent
+      responses:
+        "200":
+          description: The student.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Student" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Students]
+      summary: Update a student
+      description: Setting `transport_status` to `not_using` ends the route assignment.
+      operationId: updateStudent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StudentInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Student" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/students/{studentID}/status:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/StudentID" }
+    patch:
+      tags: [Students]
+      summary: Activate or deactivate a student
+      operationId: setStudentStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: { status: { type: string, enum: [active, inactive] } }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Student" } } }
+
+  /api/v1/schools/{schoolID}/students/{studentID}/assignment:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/StudentID" }
+    put:
+      tags: [Students]
+      summary: Assign route and stops
+      description: |
+        Stops must belong to the route. A pickup stop is required if the route runs Morning Pickup and must be empty
+        otherwise; the same for the drop stop and Evening Drop. The previous assignment is kept as history.
+      operationId: assignStudent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [route_id]
+              properties:
+                route_id: { type: string, format: uuid }
+                pickup_stop_id: { type: [string, "null"], format: uuid }
+                drop_stop_id: { type: [string, "null"], format: uuid }
+      responses:
+        "200":
+          description: The student with the new assignment.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Student" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      tags: [Students]
+      summary: Remove from route
+      operationId: unassignStudent
+      responses:
+        "204": { description: Removed (kept as history). }
+
+  /api/v1/schools/{schoolID}/students/{studentID}/assignments:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/StudentID" }
+    get:
+      tags: [Students]
+      summary: Assignment history
+      operationId: listStudentAssignments
+      responses:
+        "200":
+          description: Newest first; the current one has `ended_at` null.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/StudentAssignment" } } } }
+
+  /api/v1/schools/{schoolID}/routes/{routeID}/students:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+    get:
+      tags: [Routes & stops]
+      summary: Students currently assigned to a route
+      operationId: listRouteStudents
+      responses:
+        "200":
+          description: Active students with their pickup and drop stop IDs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        student_id: { type: string, format: uuid }
+                        name: { type: string }
+                        admission_no: { type: string }
+                        class: { type: string }
+                        section: { type: string }
+                        pickup_stop_id: { type: [string, "null"], format: uuid }
+                        drop_stop_id: { type: [string, "null"], format: uuid }
+
+  /api/v1/schools/{schoolID}/parents:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Parents]
+      summary: List parents (Transport Manager may view)
+      operationId: listParents
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: q, in: query, description: "Search parent name, mobile, child name or admission number", schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+      responses:
+        "200":
+          description: Parents with linked children, by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Parent" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+    post:
+      tags: [Parents]
+      summary: Create a parent (Super Admin, School Admin)
+      description: Also creates the parent's app login (mobile + OTP) and links the children.
+      operationId: createParent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ParentInput" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Parent" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/parents/{parentID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: parentID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Parents]
+      summary: Get a parent
+      operationId: getParent
+      responses:
+        "200":
+          description: The parent.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Parent" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Parents]
+      summary: Update a parent and replace their linked children
+      operationId: updateParent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ParentInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Parent" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/parents/{parentID}/status:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: parentID, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [Parents]
+      summary: Activate or deactivate a parent
+      description: An inactive parent is logged out of the app and cannot log in.
+      operationId: setParentStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: { status: { type: string, enum: [active, inactive] } }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Parent" } } }
+
+  /api/v1/driver/trips:
+    get:
+      tags: [Driver app]
+      summary: My trips for a day
+      description: |
+        The logged-in driver's own trips for `date` (default: today in the school's time zone), Morning Pickup first.
+        Cancelled trips are not listed. Each trip includes the route's ordered `stops`, each with `student_count`
+        (how many students board there for Morning Pickup, or get off for Evening Drop). Drivers never get student names.
+
+        **Trip status flow for the Driver app:** `scheduled` → **confirm** → `confirmed` → **start** (only on the trip's
+        date) → `started` → **end** → `completed`. A trip can also become `cancelled` by the school at any time before
+        it starts, or be changed by an admin override; refresh the list when the app resumes.
+        Start GPS sharing only after a successful **start**, and stop it after **end** (Sprint 5).
+      operationId: listDriverTrips
+      parameters:
+        - { name: date, in: query, description: "YYYY-MM-DD; default today", schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Trips with stops.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/DriverTrip" } }
+              example:
+                data:
+                  - id: 8a000000-0000-4000-8000-000000000060
+                    school_id: 4f1d2a3b-0000-4000-8000-000000000002
+                    trip_date: "2026-10-07"
+                    trip_type: morning_pickup
+                    status: scheduled
+                    route: { id: 5e000000-0000-4000-8000-000000000040, code: RS-01, name: Gandhipuram - Singanallur, stop_count: 4 }
+                    bus: { id: 9c000000-0000-4000-8000-000000000070, vehicle_number: TN-38-AB-1234, capacity: 40 }
+                    driver: { id: 3c1e0000-0000-4000-8000-000000000010, name: Kumar, mobile: "+919000000001" }
+                    student_count: 3
+                    notes: ""
+                    cancel_reason: ""
+                    confirmed_at: null
+                    started_at: null
+                    ended_at: null
+                    cancelled_at: null
+                    created_at: "2026-10-06T12:00:00Z"
+                    updated_at: "2026-10-06T12:00:00Z"
+                    stops:
+                      - { id: 6f000000-0000-4000-8000-000000000049, route_id: 5e000000-0000-4000-8000-000000000040, name: Gandhipuram, landmark: "", latitude: 11.0168, longitude: 76.9663, sequence: 1, pickup_time: "07:10", drop_time: "16:40", geofence_radius_m: 100, student_count: 0, created_at: "2026-10-01T09:00:00Z", updated_at: "2026-10-01T09:00:00Z" }
+                      - { id: 6f000000-0000-4000-8000-000000000050, route_id: 5e000000-0000-4000-8000-000000000040, name: Peelamedu, landmark: "", latitude: 11.0285, longitude: 77.0028, sequence: 2, pickup_time: "07:25", drop_time: "16:25", geofence_radius_m: 100, student_count: 2, created_at: "2026-10-01T09:00:00Z", updated_at: "2026-10-01T09:00:00Z" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/driver/trips/{tripID}:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Driver app]
+      summary: One of my trips
+      description: Another driver's trip returns 404.
+      operationId: getDriverTrip
+      responses:
+        "200":
+          description: The trip with stops.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverTrip" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/driver/trips/{tripID}/confirm:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Driver app]
+      summary: Confirm a trip (scheduled → confirmed)
+      description: The driver accepts the assignment. Allowed for today's and future trips.
+      operationId: confirmDriverTrip
+      responses:
+        "200":
+          description: The updated trip.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverTrip" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/driver/trips/{tripID}/start:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Driver app]
+      summary: Start a trip (confirmed → started)
+      description: |
+        Only on the trip's date (`409 not_trip_day` otherwise) and only one trip in progress per driver
+        (`409 another_trip_in_progress`). A scheduled trip must be confirmed first (`409 invalid_transition`).
+      operationId: startDriverTrip
+      responses:
+        "200":
+          description: The started trip.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverTrip" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/driver/trips/{tripID}/end:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Driver app]
+      summary: End a trip (started → completed)
+      operationId: endDriverTrip
+      responses:
+        "200":
+          description: The completed trip.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverTrip" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/parent/children/{studentID}/trips:
+    parameters:
+      - { $ref: "#/components/parameters/StudentID" }
+    get:
+      tags: [Parent app]
+      summary: The child's trips for a day
+      description: |
+        Trips on the child's route for `date` (default today): Morning Pickup if the child has a pickup stop, Evening Drop
+        if they have a drop stop. Includes cancelled trips so the app can say so. No driver mobile number is shared.
+      operationId: listParentChildTrips
+      parameters:
+        - { name: date, in: query, description: "YYYY-MM-DD; default today", schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Trips.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/ParentTrip" } }
+              example:
+                data:
+                  - { id: 8a000000-0000-4000-8000-000000000060, trip_date: "2026-10-07", trip_type: morning_pickup, status: started, bus_number: TN-38-AB-1234, driver_name: Kumar, started_at: "2026-10-07T01:35:00Z", ended_at: null, cancel_reason: "", child_stop_name: Peelamedu }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/trips:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Trips]
+      summary: List trips
+      operationId: listTrips
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { name: date, in: query, schema: { type: string, format: date } }
+        - { name: from, in: query, description: Range start (when date is not given), schema: { type: string, format: date } }
+        - { name: to, in: query, description: Range end, schema: { type: string, format: date } }
+        - { name: trip_type, in: query, schema: { type: string, enum: [morning_pickup, evening_drop] } }
+        - { name: status, in: query, schema: { type: string, enum: [scheduled, confirmed, started, completed, cancelled] } }
+        - { name: route_id, in: query, schema: { type: string, format: uuid } }
+        - { name: driver_id, in: query, schema: { type: string, format: uuid } }
+        - { name: bus_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Trips, newest date first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Trip" } }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+    post:
+      tags: [Trips]
+      summary: Create a daily assignment
+      description: |
+        Driver + Bus + Route + Date + Trip Type. On one date and trip type a route, a bus and a driver can each be in
+        only one trip (`409 trip_conflict`, `fields` names which). Route, bus and driver must be active; the route must
+        run the trip type and have stops; the date must be today to 90 days ahead (school time zone).
+      operationId: createTrip
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TripInput" }
+      responses:
+        "201":
+          description: Created (status scheduled).
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/schools/{schoolID}/trips/copy:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    post:
+      tags: [Trips]
+      summary: Copy a day's trips to other dates
+      description: Copies that clash or whose route, bus or driver is no longer usable are skipped and listed.
+      operationId: copyTrips
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_date, to_dates]
+              properties:
+                from_date: { type: string, format: date }
+                to_dates: { type: array, minItems: 1, maxItems: 31, items: { type: string, format: date } }
+                trip_types: { type: array, items: { type: string, enum: [morning_pickup, evening_drop] }, description: Default both. }
+      responses:
+        "200":
+          description: Result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      created: { type: integer }
+                      skipped:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            trip_date: { type: string }
+                            trip_type: { type: string }
+                            route_code: { type: string }
+                            reason: { type: string }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Trips]
+      summary: Get a trip with status history and stops
+      operationId: getTrip
+      responses:
+        "200":
+          description: The trip.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    allOf:
+                      - $ref: "#/components/schemas/Trip"
+                      - type: object
+                        properties:
+                          history: { type: array, items: { $ref: "#/components/schemas/TripStatusChange" } }
+                          stops: { type: array, items: { $ref: "#/components/schemas/TripStop" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Trips]
+      summary: Change a trip that has not started
+      description: A confirmed trip goes back to scheduled when the driver changes.
+      operationId: updateTrip
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TripInput" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/cancel:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Trips]
+      summary: Cancel a trip that has not started
+      operationId: cancelTrip
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [reason], properties: { reason: { type: string, maxLength: 500 } } }
+      responses:
+        "200":
+          description: Cancelled.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/override:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Trips]
+      summary: Override a trip's status
+      description: |
+        For when the driver cannot (e.g. phone not working): `started` (scheduled/confirmed trip, today only),
+        `completed` or `cancelled` (any trip not yet completed or cancelled). A reason is required; audited.
+      operationId: overrideTrip
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, reason]
+              properties:
+                status: { type: string, enum: [started, completed, cancelled] }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/settings/maps:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Settings]
+      summary: The school's Google Maps keys (staff)
+      description: The browser key is returned; the server key never is (only whether one is set and its last 4 characters).
+      operationId: getMapsSettings
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/MapsSettings" } } }
+    put:
+      tags: [Settings]
+      summary: Set the school's Google Maps keys (Super Admin, School Admin)
+      description: "`server_key` omitted or null keeps the stored key; an empty string removes it. Stored encrypted."
+      operationId: updateMapsSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                browser_key: { type: string, description: Empty to use OpenStreetMap. }
+                server_key: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/MapsSettings" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/driver/trips/{tripID}/locations:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Driver app]
+      summary: Send GPS fixes for my trip in progress
+      description: See "Live tracking" in the introduction for batching, offline queueing and error handling.
+      operationId: postDriverLocations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [points]
+              properties:
+                points:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items: { $ref: "#/components/schemas/GpsPoint" }
+            example:
+              points:
+                - { latitude: 11.0168, longitude: 76.9663, accuracy_m: 8, speed_mps: 7.5, heading: 82, recorded_at: "2026-10-07T01:40:05Z" }
+                - { latitude: 11.0172, longitude: 76.9671, accuracy_m: 6, speed_mps: 8.1, heading: 80, recorded_at: "2026-10-07T01:40:10Z" }
+      responses:
+        "200":
+          description: Accepted. Rejected points are listed with the reason; do not resend them.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      accepted: { type: integer }
+                      rejected:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            index: { type: integer, description: Position in the request's points array. }
+                            reason: { type: string, example: accuracy worse than 100 m }
+                      last_recorded_at: { type: [string, "null"], format: date-time }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`trip_not_started`: the trip is not in progress. Stop the location service."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: "`live_unavailable`: keep the points queued and retry."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/ws:
+    get:
+      tags: [Live tracking]
+      summary: Live tracking WebSocket
+      description: |
+        Upgrade to a WebSocket. Protocol: see "Live tracking" in the introduction.
+      operationId: liveSocket
+      security: []
+      parameters:
+        - { name: access_token, in: query, required: true, schema: { type: string } }
+        - { name: school_id, in: query, description: Super Admin only, schema: { type: string, format: uuid } }
+      responses:
+        "101": { description: Switched to WebSocket. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/schools/{schoolID}/live:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Live tracking]
+      summary: Every bus with a trip in progress (staff)
+      operationId: getLiveSnapshot
+      responses:
+        "200":
+          description: Current positions.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/BusLocation" } } } }
+
+  /api/v1/schools/{schoolID}/settings/tracking:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Settings]
+      summary: GPS history retention and offline threshold (staff)
+      operationId: getTrackingSettings
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/TrackingSettings" } } }
+    put:
+      tags: [Settings]
+      summary: Change tracking settings (Super Admin, School Admin)
+      operationId: updateTrackingSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TrackingSettings" }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/TrackingSettings" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/parent/children/{studentID}/live:
+    parameters:
+      - { $ref: "#/components/parameters/StudentID" }
+    get:
+      tags: [Parent app]
+      summary: Tracking screen for one child
+      description: |
+        The child's most relevant trip today (in progress, else the next, else the last), where the bus is, and the
+        status and ETA of the child's own stop. `trip` is null when the child has no trip today; `bus` is null until
+        the bus sends GPS (and after the trip ends). After the trip, `child_stop` still shows how it went.
+      operationId: getParentChildLive
+      responses:
+        "200":
+          description: Live view.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/ParentLive" } } }
+              example:
+                data:
+                  trip: { id: 8a000000-0000-4000-8000-000000000060, trip_date: "2026-10-07", trip_type: morning_pickup, status: started, bus_number: TN-38-AB-1234, driver_name: Kumar, started_at: "2026-10-07T01:35:00Z", ended_at: null, cancel_reason: "", child_stop_name: Peelamedu }
+                  bus: { bus_number: TN-38-AB-1234, latitude: 11.0201, longitude: 76.9802, speed_mps: 7.9, heading: 75, state: moving, last_seen: "2026-10-07T01:48:12Z" }
+                  child_stop: { stop_id: 6f000000-0000-4000-8000-000000000050, name: Peelamedu, status: approaching, missed: false, scheduled_time: "07:25", eta_seconds: 480, distance_m: 2400, reached_at: null, crossed_at: null }
+                  eta_source: google
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/driver/trips/{tripID}/progress:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Driver app]
+      summary: Stop-by-stop progress of my trip
+      operationId: getDriverTripProgress
+      responses:
+        "200":
+          description: Progress, latest position and stop events.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/TripProgressResponse" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/progress:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Trips]
+      summary: Stop-by-stop progress and event timeline
+      description: "`progress` is live while the trip is in progress; `events` are kept after it ends."
+      operationId: getTripProgress
+      responses:
+        "200":
+          description: Progress, latest position and stop events.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/TripProgressResponse" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -990,11 +2039,370 @@ components:
   parameters:
     SchoolID: { name: schoolID, in: path, required: true, schema: { type: string, format: uuid } }
     RouteID: { name: routeID, in: path, required: true, schema: { type: string, format: uuid } }
+    StudentID: { name: studentID, in: path, required: true, schema: { type: string, format: uuid } }
+    TripID: { name: tripID, in: path, required: true, schema: { type: string, format: uuid } }
     UserID: { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
     Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
     PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
 
   schemas:
+    StopProgress:
+      type: object
+      properties:
+        stop_id: { type: string, description: 'Stop ID, or "school" for the school (end of Morning Pickup).' }
+        sequence: { type: integer }
+        name: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        radius_m: { type: number }
+        scheduled_time: { type: [string, "null"], description: "Pickup time (morning) or drop time (evening), HH:MM." }
+        status: { type: string, enum: [upcoming, approaching, reached, crossed] }
+        missed: { type: boolean, description: Crossed without being reached. }
+        reached_at: { type: [string, "null"], format: date-time }
+        crossed_at: { type: [string, "null"], format: date-time }
+        eta_seconds: { type: [integer, "null"], description: From the bus's current position; null once reached or crossed. }
+        distance_m: { type: [integer, "null"] }
+    TripProgress:
+      type: object
+      properties:
+        trip_id: { type: string, format: uuid }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        stops: { type: array, items: { $ref: "#/components/schemas/StopProgress" }, description: In travel order. }
+        speed_mps: { type: number, description: Smoothed recent speed. }
+        eta_source: { type: string, enum: [google, estimate] }
+        updated_at: { type: string, format: date-time }
+    TripProgressResponse:
+      type: object
+      properties:
+        progress:
+          oneOf: [{ $ref: "#/components/schemas/TripProgress" }, { type: "null" }]
+          description: Null when the trip is not in progress or has no GPS yet.
+        location:
+          oneOf: [{ $ref: "#/components/schemas/BusLocation" }, { type: "null" }]
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              stop_id: { type: [string, "null"], description: Null for school_reached. }
+              stop_name: { type: [string, "null"] }
+              event_type: { type: string, enum: [approaching, reached, crossed, school_reached] }
+              missed: { type: boolean }
+              occurred_at: { type: string, format: date-time }
+    ParentLive:
+      type: object
+      properties:
+        trip:
+          oneOf: [{ $ref: "#/components/schemas/ParentTrip" }, { type: "null" }]
+        bus:
+          oneOf:
+            - type: "null"
+            - type: object
+              properties:
+                bus_number: { type: string }
+                latitude: { type: number }
+                longitude: { type: number }
+                speed_mps: { type: [number, "null"] }
+                heading: { type: [number, "null"] }
+                state: { type: string, enum: [moving, stopped, offline] }
+                last_seen: { type: string, format: date-time }
+        child_stop:
+          oneOf:
+            - type: "null"
+            - type: object
+              properties:
+                stop_id: { type: string, format: uuid }
+                name: { type: string }
+                status: { type: string, enum: [upcoming, approaching, reached, crossed] }
+                missed: { type: boolean }
+                scheduled_time: { type: [string, "null"] }
+                eta_seconds: { type: [integer, "null"] }
+                distance_m: { type: [integer, "null"] }
+                reached_at: { type: [string, "null"], format: date-time }
+                crossed_at: { type: [string, "null"], format: date-time }
+        eta_source: { type: string, enum: [google, estimate, ""] }
+    GpsPoint:
+      type: object
+      required: [latitude, longitude, accuracy_m, recorded_at]
+      properties:
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        accuracy_m: { type: number, exclusiveMinimum: 0, description: Horizontal accuracy in metres; worse than 100 is rejected. }
+        speed_mps: { type: [number, "null"], description: "Metres per second, if the device reports it." }
+        heading: { type: [number, "null"], description: "Degrees from north, if available." }
+        recorded_at: { type: string, format: date-time, description: Device time of the fix (UTC). }
+    BusLocation:
+      type: object
+      description: The current position of the bus on a trip in progress.
+      properties:
+        trip_id: { type: string, format: uuid }
+        school_id: { type: string, format: uuid }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        route_id: { type: string, format: uuid }
+        route_code: { type: string }
+        bus_number: { type: string }
+        driver_name: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        accuracy_m: { type: number }
+        speed_mps: { type: [number, "null"] }
+        heading: { type: [number, "null"] }
+        recorded_at: { type: string, format: date-time, description: Device time of the fix. }
+        received_at: { type: string, format: date-time, description: When the server received it ("last seen"). }
+        stale: { type: boolean, description: No GPS for longer than the school's stale_after_seconds. }
+      example:
+        trip_id: 8a000000-0000-4000-8000-000000000060
+        school_id: 4f1d2a3b-0000-4000-8000-000000000002
+        trip_type: morning_pickup
+        route_id: 5e000000-0000-4000-8000-000000000040
+        route_code: RS-01
+        bus_number: TN-38-AB-1234
+        driver_name: Kumar
+        latitude: 11.0172
+        longitude: 76.9671
+        accuracy_m: 6
+        speed_mps: 8.1
+        heading: 80
+        recorded_at: "2026-10-07T01:40:10Z"
+        received_at: "2026-10-07T01:40:11Z"
+        stale: false
+    TrackingSettings:
+      type: object
+      required: [location_retention_days, stale_after_seconds, approach_distance_m]
+      properties:
+        location_retention_days: { type: integer, minimum: 0, maximum: 365, description: "Days of GPS history to keep; 0 keeps none." }
+        stale_after_seconds: { type: integer, minimum: 30, maximum: 1800, description: No GPS for this long marks a bus offline. }
+        approach_distance_m: { type: integer, minimum: 100, maximum: 5000, description: '"Approaching" fires within this distance.' }
+        school_latitude: { type: [number, "null"], description: "The school's location: Morning Pickup destination (School Reached)." }
+        school_longitude: { type: [number, "null"] }
+    TripInput:
+      type: object
+      required: [trip_date, trip_type, route_id, bus_id, driver_id]
+      properties:
+        trip_date: { type: string, format: date, example: "2026-10-07" }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        route_id: { type: string, format: uuid }
+        bus_id: { type: string, format: uuid }
+        driver_id: { type: string, format: uuid }
+        notes: { type: string, maxLength: 500 }
+    Trip:
+      type: object
+      required: [id, school_id, trip_date, trip_type, status, route, bus, driver, student_count]
+      properties:
+        id: { type: string, format: uuid }
+        school_id: { type: string, format: uuid }
+        trip_date: { type: string, format: date, description: In the school's time zone. }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        status: { type: string, enum: [scheduled, confirmed, started, completed, cancelled] }
+        route:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            code: { type: string }
+            name: { type: string }
+            stop_count: { type: integer }
+        bus:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            vehicle_number: { type: string }
+            capacity: { type: integer }
+        driver:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            mobile: { type: string }
+        student_count: { type: integer, description: Students on the route with a stop for this trip type. }
+        notes: { type: string }
+        cancel_reason: { type: string }
+        confirmed_at: { type: [string, "null"], format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        cancelled_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TripStop:
+      allOf:
+        - $ref: "#/components/schemas/Stop"
+        - type: object
+          properties:
+            student_count: { type: integer, description: Students boarding (Morning Pickup) or getting off (Evening Drop) here. }
+    DriverTrip:
+      allOf:
+        - $ref: "#/components/schemas/Trip"
+        - type: object
+          required: [stops]
+          properties:
+            stops: { type: array, items: { $ref: "#/components/schemas/TripStop" } }
+    TripStatusChange:
+      type: object
+      properties:
+        from_status: { type: [string, "null"] }
+        to_status: { type: string }
+        changed_by_name: { type: [string, "null"] }
+        changed_by_role: { type: string }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
+    ParentTrip:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        trip_date: { type: string, format: date }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        status: { type: string, enum: [scheduled, confirmed, started, completed, cancelled] }
+        bus_number: { type: string }
+        driver_name: { type: string }
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        cancel_reason: { type: string }
+        child_stop_name: { type: string, description: The child's pickup stop (morning) or drop stop (evening). }
+    MapsSettings:
+      type: object
+      properties:
+        browser_key: { type: string }
+        server_key_set: { type: boolean }
+        server_key_hint: { type: string, example: "…Wxyz" }
+    StopRef:
+      type: object
+      required: [id, name, sequence, latitude, longitude, pickup_time, drop_time]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        sequence: { type: integer }
+        latitude: { type: number }
+        longitude: { type: number }
+        pickup_time: { type: [string, "null"], description: "HH:MM, Morning Pickup" }
+        drop_time: { type: [string, "null"], description: "HH:MM, Evening Drop" }
+    StudentAssignment:
+      type: object
+      required: [id, route_id, route_code, route_name, pickup_stop, drop_stop, assigned_at, ended_at]
+      properties:
+        id: { type: string, format: uuid }
+        route_id: { type: string, format: uuid }
+        route_code: { type: string }
+        route_name: { type: string }
+        pickup_stop:
+          oneOf: [{ $ref: "#/components/schemas/StopRef" }, { type: "null" }]
+          description: Null if the route does not run Morning Pickup.
+        drop_stop:
+          oneOf: [{ $ref: "#/components/schemas/StopRef" }, { type: "null" }]
+          description: Null if the route does not run Evening Drop.
+        assigned_by_name: { type: [string, "null"] }
+        assigned_at: { type: string, format: date-time }
+        ended_at: { type: [string, "null"], format: date-time, description: Null for the current assignment. }
+    ParentChild:
+      type: object
+      required: [student_id, name, admission_no, class, section, assignment]
+      properties:
+        student_id: { type: string, format: uuid }
+        name: { type: string }
+        admission_no: { type: string }
+        class: { type: string }
+        section: { type: string }
+        assignment:
+          oneOf: [{ $ref: "#/components/schemas/StudentAssignment" }, { type: "null" }]
+    StudentInput:
+      type: object
+      required: [admission_no, name]
+      properties:
+        admission_no: { type: string, description: Unique per school; stored upper-case. }
+        name: { type: string }
+        class: { type: string, example: "5" }
+        section: { type: string, example: A }
+        notes: { type: string, description: Admin-only. }
+        transport_status: { type: string, enum: [uses_transport, not_using], default: uses_transport }
+    Student:
+      type: object
+      required: [id, school_id, admission_no, name, class, section, status, transport_status, assignment, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        school_id: { type: string, format: uuid }
+        admission_no: { type: string }
+        name: { type: string }
+        class: { type: string }
+        section: { type: string }
+        notes: { type: string, description: Omitted for Transport Managers. }
+        status: { type: string, enum: [active, inactive] }
+        transport_status: { type: string, enum: [uses_transport, not_using] }
+        assignment:
+          oneOf: [{ $ref: "#/components/schemas/StudentAssignment" }, { type: "null" }]
+        parents:
+          type: array
+          description: Only on GET of a single student.
+          items:
+            type: object
+            properties:
+              parent_id: { type: string, format: uuid }
+              name: { type: string }
+              mobile: { type: string }
+              relationship: { type: string, enum: [father, mother, guardian] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ParentInput:
+      type: object
+      required: [name, mobile]
+      properties:
+        name: { type: string }
+        mobile: { type: string, description: The parent's OTP login number. }
+        alternate_mobile: { type: string }
+        email: { type: string }
+        address: { type: string }
+        children:
+          type: array
+          description: Replaces the linked children on update.
+          items:
+            type: object
+            required: [student_id]
+            properties:
+              student_id: { type: string, format: uuid }
+              relationship: { type: string, enum: [father, mother, guardian], default: guardian }
+    Parent:
+      type: object
+      required: [id, school_id, user_id, name, mobile, status, children, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        school_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        name: { type: string }
+        mobile: { type: string }
+        alternate_mobile: { type: string }
+        email: { type: string }
+        address: { type: string }
+        status: { type: string, enum: [active, inactive] }
+        last_login_at: { type: [string, "null"], format: date-time }
+        children:
+          type: array
+          items:
+            type: object
+            properties:
+              student_id: { type: string, format: uuid }
+              name: { type: string }
+              admission_no: { type: string }
+              class: { type: string }
+              section: { type: string }
+              relationship: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ImportResult:
+      type: object
+      properties:
+        dry_run: { type: boolean }
+        imported: { type: boolean, description: True only when the data was saved. }
+        total_rows: { type: integer }
+        students_created: { type: integer }
+        students_updated: { type: integer }
+        parents_created: { type: integer }
+        parent_links: { type: integer }
+        assignments_set: { type: integer }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              row: { type: integer, description: Line number in the file (header is line 1). }
+              field: { type: string }
+              message: { type: string }
     DriverInput:
       type: object
       required: [name, mobile]
@@ -1238,6 +2646,14 @@ components:
         data: { $ref: "#/components/schemas/Health" }
 
   responses:
+    TripStateConflict:
+      description: |
+        The trip is not in a state that allows this. Codes: `invalid_transition`, `not_trip_day`,
+        `another_trip_in_progress`, `status_changed` (changed meanwhile: reload).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: invalid_transition, message: This trip is completed and cannot be started. } }
     ValidationFailed:
       description: Invalid input.
       content:

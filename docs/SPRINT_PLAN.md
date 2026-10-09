@@ -87,18 +87,18 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S3-01 | BE | Schema: `students`, `parents`, `parent_students` (many-to-many), `student_assignments` (route, pickup stop, drop stop, effective dates) | Migration applied |
-| S3-02 | BE | Students CRUD: name, admission no (unique per school), class, section, status, transport status | API + tests |
-| S3-03 | BE | Parents CRUD: guardian details, mobile (unique, OTP identity), link/unlink students | API + tests |
-| S3-04 | BE | Student assignment API: validate that the stop belongs to the route; keep history on change | Wrong route/stop pair → 400 |
-| S3-05 | BE | Transport Manager sees a **limited** student view (name, class, stop only) | Response excludes non-transport fields |
-| S3-06 | BE | Bulk import students + parents (CSV) with row-level error report | 500-row CSV imports with error list |
-| S3-07 | FE | Students pages + parent linking UI | CRUD from UI |
-| S3-08 | FE | Parents pages | CRUD from UI |
-| S3-09 | FE | Assignment UI: pick route → dropdown shows **only that route's stops** | Matches rule 5 |
-| S3-10 | FE | Route view: list of students per stop | Visible per route |
-| S3-11 | FE | CSV import screen with downloadable template | Works end to end |
-| S3-12 | API | **Handoff 2, Master data reads:** driver profile, bus, route + ordered stops; parent → linked children → route/stop | Endpoints in `/docs` with examples |
+| ✅ S3-01 | BE | Schema: `students`, `parents`, `parent_students` (many-to-many), `student_assignments` (route, pickup stop, drop stop, effective dates) | Migration applied |
+| ✅ S3-02 | BE | Students CRUD: name, admission no (unique per school), class, section, status, transport status | API + tests |
+| ✅ S3-03 | BE | Parents CRUD: guardian details, mobile (unique, OTP identity), link/unlink students | API + tests |
+| ✅ S3-04 | BE | Student assignment API: validate that the stop belongs to the route; keep history on change | Wrong route/stop pair → 400 |
+| ✅ S3-05 | BE | Transport Manager sees a **limited** student view (name, class, stop only) | Response excludes non-transport fields |
+| ✅ S3-06 | BE | Bulk import students + parents (CSV) with row-level error report | 500-row CSV imports with error list |
+| ✅ S3-07 | FE | Students pages + parent linking UI | CRUD from UI |
+| ✅ S3-08 | FE | Parents pages | CRUD from UI |
+| ✅ S3-09 | FE | Assignment UI: pick route → dropdown shows **only that route's stops** | Matches rule 5 |
+| ✅ S3-10 | FE | Route view: list of students per stop | Visible per route |
+| ✅ S3-11 | FE | CSV import screen with downloadable template | Works end to end |
+| ✅ S3-12 | API | **Handoff 2, Master data reads:** `GET /driver/me`; `GET /parent/children` (+ `/{id}` with route stops). Driver bus/route come with trips in Handoff 3 | Endpoints in `/docs` with examples |
 
 ---
 
@@ -108,17 +108,18 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S4-01 | BE | Schema: `trips` (date, driver, bus, route, trip_type MORNING_PICKUP/EVENING_DROP, status, started_at, ended_at), `trip_status_history` | Migration applied |
-| S4-02 | BE | Create daily assignment: block conflicts (same driver or bus twice on the same date + trip type; inactive bus/driver) | Conflict → 409 |
-| S4-03 | BE | Copy assignments from previous day / week (bulk) | One click copies a day |
-| S4-04 | BE | Trip lifecycle state machine: Scheduled → Confirmed → Started → Completed / Cancelled, plus admin override | Invalid transition → 400 |
-| S4-05 | BE | Driver APIs: today's trips (own only), confirm, start, end | Driver cannot see others' trips |
-| S4-06 | FE | Daily assignment board: date picker, morning/evening tabs, create/edit/cancel | Full flow from UI |
-| S4-07 | FE | Trip list + trip detail with status history; admin override action | Visible + override audited |
+| ✅ S4-01 | BE | Schema: `trips` (date, driver, bus, route, trip_type MORNING_PICKUP/EVENING_DROP, status, started_at, ended_at), `trip_status_history` | Migration applied |
+| ✅ S4-02 | BE | Create daily assignment: block conflicts (same driver or bus twice on the same date + trip type; inactive bus/driver) | Conflict → 409 |
+| ✅ S4-03 | BE | Copy assignments from previous day / week (bulk) | One click copies a day |
+| ✅ S4-04 | BE | Trip lifecycle state machine: Scheduled → Confirmed → Started → Completed / Cancelled, plus admin override | Invalid transition → 400 |
+| ✅ S4-05 | BE | Driver APIs: today's trips (own only), confirm, start, end | Driver cannot see others' trips |
+| ✅ S4-06 | FE | Daily assignment board: date picker, morning/evening tabs, create/edit/cancel | Full flow from UI |
+| ✅ S4-07 | FE | Trip list + trip detail with status history; admin override action | Visible + override audited |
 | S4-08 | MOB | Driver app setup (project, navigation, API client, secure token storage) | Builds on device |
 | S4-09 | MOB | Driver OTP login | Logs in with real OTP / stub |
 | S4-10 | MOB | Today's trips screen → trip detail (route, ordered stops, bus) → Confirm / Start / End | Status updates in admin web |
 | S4-11 | API | **Handoff 3, Driver trips:** today's trips, trip detail, confirm/start/end, status values and allowed transitions | Mobile team completes a trip on dev |
+| ✅ S4-12 | BE+FE | Per-school Google Maps keys in Settings: browser key (admin maps, falls back to OpenStreetMap) and server key (ETA, encrypted at rest, never returned) | Each school uses its own key |
 
 ---
 
@@ -128,16 +129,16 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S5-01 | BE | Location ingest API `POST /trips/{id}/locations` (batch points: lat, lng, accuracy, speed, heading, ts); only allowed while the trip is Started and by its driver | Others → 403 |
-| S5-02 | BE | Filter bad points (low accuracy, impossible jumps, old timestamps) | Unit tests with noisy data |
-| S5-03 | BE | Write current location to Redis (`bus:{trip_id}:loc`) + last_seen; publish via Redis pub/sub | Redis value updates |
-| S5-04 | BE | Location history table (only when retention is enabled) + retention cleanup job | Old rows purged per setting |
-| S5-05 | BE | WebSocket server: token auth on connect, subscribe to a trip/school channel with **role + school + ownership check** | Parent cannot subscribe to another route |
-| S5-06 | BE | Fan-out hub (Redis pub/sub → WS clients), heartbeats, reconnect support | Survives client reconnect |
-| S5-07 | BE | Stale/offline detection job (no point in N seconds → OFFLINE event) | Bus marked stale on admin map |
+| ✅ S5-01 | BE | Location ingest API `POST /trips/{id}/locations` (batch points: lat, lng, accuracy, speed, heading, ts); only allowed while the trip is Started and by its driver | Others → 403 |
+| ✅ S5-02 | BE | Filter bad points (low accuracy, impossible jumps, old timestamps) | Unit tests with noisy data |
+| ✅ S5-03 | BE | Write current location to Redis (`bus:{trip_id}:loc`) + last_seen; publish via Redis pub/sub | Redis value updates |
+| ✅ S5-04 | BE | Location history table (only when retention is enabled) + retention cleanup job | Old rows purged per setting |
+| ✅ S5-05 | BE | WebSocket server: token auth on connect, subscribe to a trip/school channel with **role + school + ownership check** | Parent cannot subscribe to another route |
+| ✅ S5-06 | BE | Fan-out hub (Redis pub/sub → WS clients), heartbeats, reconnect support | Survives client reconnect |
+| ✅ S5-07 | BE | Stale/offline detection job (no point in N seconds → OFFLINE event) | Bus marked stale on admin map |
 | S5-08 | MOB | Driver background location service (foreground notification), runs only while a trip is Started; offline queue + batch upload | Points arrive with screen off |
-| S5-09 | FE | Live map page: all active buses, click a bus for trip info, auto-update via WS | Moves without refresh |
-| S5-10 | OPS | GPS simulator script (replays a route path) for testing without a phone | `go run ./tools/simulate` moves a bus |
+| ✅ S5-09 | FE | Live map page: all active buses, click a bus for trip info, auto-update via WS | Moves without refresh |
+| ✅ S5-10 | OPS | GPS simulator script (replays a route path) for testing without a phone | `go run ./cmd/simulate` moves a bus |
 | S5-11 | API | **Handoff 4, Live tracking:** location batch upload contract (fields, batching, offline replay rules), WebSocket protocol doc (auth, subscribe, message types, heartbeat, reconnect), GPS simulator for their testing | Mobile team uploads points and sees them on admin map |
 
 ---
@@ -148,14 +149,14 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S6-01 | BE | Geofence engine: Upcoming / Approaching / Reached / Crossed per stop, with hysteresis (needs N consecutive points; ignores low accuracy) | Simulator test: no false Reached on GPS jitter |
-| S6-02 | BE | Stop events table + publish stop events over WS | Events stored + pushed |
-| S6-03 | BE | ETA + distance: bus position → child's stop (along remaining stops; maps API or haversine × speed fallback) | ETA shown in minutes + km |
-| S6-04 | BE | Parent APIs: my children, child's route/stop/today's trips, current trip state (scoped to linked children only) | Cannot access unlinked student → 403 |
+| ✅ S6-01 | BE | Geofence engine: Upcoming / Approaching / Reached / Crossed per stop, with hysteresis (needs N consecutive points; ignores low accuracy) | Simulator test: no false Reached on GPS jitter |
+| ✅ S6-02 | BE | Stop events table + publish stop events over WS | Events stored + pushed |
+| ✅ S6-03 | BE | ETA + distance: bus position → child's stop (along remaining stops; maps API or haversine × speed fallback) | ETA shown in minutes + km |
+| ✅ S6-04 | BE | Parent APIs: my children, child's route/stop/today's trips, current trip state (scoped to linked children only) | Cannot access unlinked student → 403 |
 | S6-05 | MOB | Parent app setup + OTP login | Logs in |
 | S6-06 | MOB | Children list + **switch child** (refreshes route, stop, bus, ETA, status, notifications) | Switch reloads all data |
 | S6-07 | MOB | Live tracking screen: map, bus marker, my stop, status line `Bus: X \| Status \| ETA \| Distance`, Morning/Evening clearly labelled | Live update via WS |
-| S6-08 | FE | Admin trip detail: stop-by-stop status timeline live | Updates live |
+| ✅ S6-08 | FE | Admin trip detail: stop-by-stop status timeline live | Updates live |
 | S6-09 | API | **Handoff 5, Parent tracking:** children list, child trip state, ETA/distance, stop status messages over WebSocket | Parent app shows live ETA on dev |
 
 ---

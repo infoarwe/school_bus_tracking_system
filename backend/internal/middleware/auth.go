@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -15,6 +17,58 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
 )
 
+// AuthError is why a token or session was rejected.
+type AuthError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *AuthError) Error() string { return e.Message }
+
+var (
+	errTokenInvalid   = &AuthError{http.StatusUnauthorized, "token_invalid", "Session expired. Please log in again."}
+	errSessionRevoked = &AuthError{http.StatusUnauthorized, "session_revoked", "Session ended. Please log in again."}
+	errSuspended      = &AuthError{http.StatusForbidden, "account_suspended", "Your account is suspended."}
+	errSchoolInactive = &AuthError{http.StatusForbidden, "school_inactive", "Your school's account is inactive."}
+)
+
+// LoadPrincipal validates an access token and re-checks the session, user and
+// school in the database. Used by Authenticate and by the WebSocket endpoint
+// (which also calls it periodically to drop revoked sessions).
+func LoadPrincipal(ctx context.Context, tokens *auth.TokenManager, st *store.Store, raw string) (*auth.Principal, error) {
+	claims, err := tokens.ParseAccess(raw)
+	if err != nil {
+		return nil, errTokenInvalid
+	}
+	return RecheckSession(ctx, st, claims.Subject, claims.SessionID)
+}
+
+// RecheckSession loads the current principal for a session, failing if it was
+// revoked or the user or school was deactivated.
+func RecheckSession(ctx context.Context, st *store.Store, userID, sessionID string) (*auth.Principal, error) {
+	state, err := store.GetSessionState(ctx, st.Pool, sessionID, userID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, errSessionRevoked
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load session state: %w", err)
+	}
+	if state.UserStatus != models.StatusActive {
+		return nil, errSuspended
+	}
+	if state.SchoolStatus != nil && *state.SchoolStatus != models.StatusActive {
+		return nil, errSchoolInactive
+	}
+	return &auth.Principal{
+		UserID:      userID,
+		Role:        state.Role,
+		SchoolID:    state.SchoolID,
+		SessionID:   sessionID,
+		TOTPEnabled: state.TOTPEnabled,
+	}, nil
+}
+
 // Authenticate requires a valid access token, then re-checks the session, user
 // and school in the database so logout, suspension and school deactivation
 // take effect on the next request. Role and school come from the database,
@@ -27,37 +81,16 @@ func Authenticate(tokens *auth.TokenManager, st *store.Store) func(http.Handler)
 				httpx.Error(w, http.StatusUnauthorized, "unauthorized", "Login required.")
 				return
 			}
-			claims, err := tokens.ParseAccess(raw)
-			if err != nil {
-				httpx.Error(w, http.StatusUnauthorized, "token_invalid", "Session expired. Please log in again.")
-				return
-			}
-
-			state, err := store.GetSessionState(r.Context(), st.Pool, claims.SessionID, claims.Subject)
-			if errors.Is(err, store.ErrNotFound) {
-				httpx.Error(w, http.StatusUnauthorized, "session_revoked", "Session ended. Please log in again.")
+			p, err := LoadPrincipal(r.Context(), tokens, st, raw)
+			var ae *AuthError
+			if errors.As(err, &ae) {
+				httpx.Error(w, ae.Status, ae.Code, ae.Message)
 				return
 			}
 			if err != nil {
-				slog.Error("load session state", "err", err)
+				slog.Error("authenticate", "err", err)
 				httpx.Error(w, http.StatusInternalServerError, "internal_error", "Something went wrong.")
 				return
-			}
-			if state.UserStatus != models.StatusActive {
-				httpx.Error(w, http.StatusForbidden, "account_suspended", "Your account is suspended.")
-				return
-			}
-			if state.SchoolStatus != nil && *state.SchoolStatus != models.StatusActive {
-				httpx.Error(w, http.StatusForbidden, "school_inactive", "Your school's account is inactive.")
-				return
-			}
-
-			p := &auth.Principal{
-				UserID:      claims.Subject,
-				Role:        state.Role,
-				SchoolID:    state.SchoolID,
-				SessionID:   claims.SessionID,
-				TOTPEnabled: state.TOTPEnabled,
 			}
 			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))
 		})

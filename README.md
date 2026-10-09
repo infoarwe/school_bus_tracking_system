@@ -47,6 +47,15 @@ Check: `curl http://localhost:8085/health` returns `{"data":{"status":"ok","chec
 
 OTP `123456` works only while `OTP_DEV_CODE` is set (never in production). With `REQUIRE_SUPER_ADMIN_2FA=true` the Super Admin must set up an authenticator app at first login.
 
+## Try live tracking without a phone
+
+```sh
+cd backend
+go run ./cmd/simulate -end   # logs in as the demo driver, starts today's trip, drives RS-01
+```
+
+Open **Live Tracking** in the admin web to watch the bus move. `go run ./cmd/simulate -h` lists options (speed, interval, other driver, bad-point injection).
+
 ## Common commands
 
 | Task | Backend (`backend/`) | Frontend (`frontend/`) |
