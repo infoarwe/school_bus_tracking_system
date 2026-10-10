@@ -26,15 +26,18 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/handlers"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/models"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/notify"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/ratelimit"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/router"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/storage"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/tracking"
 )
 
 const (
-	testPassword = "Password@123"
-	devOTP       = "123456"
+	testPassword     = "Password@123"
+	devOTP           = "123456"
+	testMaxLogoBytes = 64 << 10
 )
 
 type env struct {
@@ -86,6 +89,12 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(stopHub)
 	go hub.Run(hubCtx)
 
+	files, err := storage.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = files.Close() })
+
 	eta := &fakeETA{}
 	pushes := &fakePush{}
 	api := &handlers.API{
@@ -99,6 +108,9 @@ func newEnv(t *testing.T) *env {
 		Hub:                  hub,
 		ETA:                  eta,
 		CheckPushKey:         func(context.Context, []byte) error { return nil },
+		Limiter:              ratelimit.New(rdb, ratelimit.DefaultRules()),
+		Files:                files,
+		MaxLogoBytes:         testMaxLogoBytes,
 		RequireSuperAdmin2FA: true,
 	}
 	srv := router.New(router.Deps{Health: &handlers.HealthHandler{}, API: api, RequireSuperAdmin2FA: true})
@@ -120,6 +132,12 @@ func (r resp) errCode() string {
 
 func (e *env) do(method, path, token string, body any) resp {
 	e.t.Helper()
+	rec := httptest.NewRecorder()
+	e.srv.ServeHTTP(rec, newJSONRequest(method, path, token, body))
+	return decodeResp(rec)
+}
+
+func newJSONRequest(method, path, token string, body any) *http.Request {
 	var rdr io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -130,8 +148,10 @@ func (e *env) do(method, path, token string, body any) resp {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	rec := httptest.NewRecorder()
-	e.srv.ServeHTTP(rec, req)
+	return req
+}
+
+func decodeResp(rec *httptest.ResponseRecorder) resp {
 	out := resp{Status: rec.Code}
 	_ = json.Unmarshal(rec.Body.Bytes(), &out.Body)
 	return out

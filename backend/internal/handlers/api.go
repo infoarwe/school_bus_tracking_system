@@ -14,7 +14,10 @@ import (
 
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/auth"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/httpx"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/middleware"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/ratelimit"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/storage"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/tracking"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/validate"
@@ -36,11 +39,30 @@ type API struct {
 	CheckPushKey PushKeyChecker
 	// WSOriginPatterns are the browser origins allowed to open the WebSocket (host[:port]).
 	WSOriginPatterns []string
+	// Limiter enforces request rate limits (S9-01); nil disables them.
+	Limiter *ratelimit.Limiter
+	// Files stores uploads (school logos); MaxLogoBytes caps a logo upload.
+	Files        storage.Store
+	MaxLogoBytes int64
 
 	OTPTTL     time.Duration
 	OTPDevCode string
 	// RequireSuperAdmin2FA is reported to the client in /auth/me.
 	RequireSuperAdmin2FA bool
+}
+
+var (
+	loginAccountRule    = func(r *ratelimit.Rules) ratelimit.Rule { return r.LoginAccount }
+	otpVerifyMobileRule = func(r *ratelimit.Rules) ratelimit.Rule { return r.OTPVerifyMobile }
+)
+
+// allow applies a rate limit keyed by request data (an email, a mobile). Over
+// the limit it writes 429 rate_limited and returns false.
+func (a *API) allow(w http.ResponseWriter, r *http.Request, rule middleware.RuleOf, id string) bool {
+	if a.Limiter == nil {
+		return true
+	}
+	return middleware.Allow(w, r, a.Limiter, rule(&a.Limiter.Rules), id)
 }
 
 // page reads ?page and ?page_size (default 1 and 20, max 100).
@@ -85,7 +107,7 @@ func (a *API) audit(ctx context.Context, q store.DBTX, r *http.Request, e store.
 }
 
 func clientIP(r *http.Request) string {
-	return r.RemoteAddr // chi RealIP middleware has already applied X-Forwarded-For
+	return middleware.ClientIP(r) // behind Nginx, chi RealIP has already applied X-Real-IP
 }
 
 // storeError maps store errors to responses. conflicts maps a unique constraint

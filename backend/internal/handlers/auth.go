@@ -51,6 +51,10 @@ func (a *API) Login(w http.ResponseWriter, r *http.Request) {
 		httpx.ValidationError(w, v.Errors())
 		return
 	}
+	// Password guessing: a few attempts per account, whatever the IP.
+	if !a.allow(w, r, loginAccountRule, "email:"+strings.ToLower(strings.TrimSpace(req.Email))) {
+		return
+	}
 
 	u, err := store.GetUserByEmail(r.Context(), a.Store.Pool, strings.TrimSpace(req.Email))
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -96,6 +100,9 @@ func (a *API) Login2FA(w http.ResponseWriter, r *http.Request) {
 	claims, err := a.Tokens.ParseMFA(req.MFAToken)
 	if err != nil {
 		httpx.Error(w, http.StatusUnauthorized, "mfa_token_invalid", "Login expired. Please start again.")
+		return
+	}
+	if !a.allow(w, r, loginAccountRule, "2fa:"+claims.Subject) {
 		return
 	}
 	u, err := store.GetUser(r.Context(), a.Store.Pool, claims.Subject)
@@ -202,6 +209,10 @@ func (a *API) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	role := models.Role(req.App)
 	ctx := r.Context()
+	// Code guessing across many requested codes: a cap per number, whatever the IP.
+	if !a.allow(w, r, otpVerifyMobileRule, "otp:"+req.App+":"+req.Mobile) {
+		return
+	}
 
 	otp, err := store.GetActiveOTP(ctx, a.Store.Pool, req.Mobile, role)
 	if errors.Is(err, store.ErrNotFound) {
@@ -335,7 +346,15 @@ func (a *API) RevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := auth.FromContext(r.Context())
-	if err := store.RevokeSession(r.Context(), a.Store.Pool, p.UserID, id); err != nil {
+	ctx := r.Context()
+	err := a.Store.InTx(ctx, func(q store.DBTX) error {
+		if err := store.RevokeSession(ctx, q, p.UserID, id); err != nil {
+			return err
+		}
+		return a.audit(ctx, q, r, store.AuditEntry{SchoolID: p.SchoolID, Action: "auth.session_revoke",
+			EntityType: "user", EntityID: &p.UserID, After: map[string]string{"session_id": id}})
+	})
+	if err != nil {
 		storeError(w, r, err, nil)
 		return
 	}

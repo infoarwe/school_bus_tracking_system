@@ -26,6 +26,9 @@ const baseURL = import.meta.env.VITE_API_URL ?? ''
 
 export const api = axios.create({ baseURL, timeout: 15000 })
 
+/** Absolute URL for a path the API returns (e.g. a logo_url), for <img src>. */
+export const apiUrl = (path: string) => baseURL + path
+
 // Called when the session cannot be recovered; AuthContext sends the user to login.
 let onSessionLost: (reason: ApiError) => void = () => {}
 export function setSessionLostHandler(fn: (reason: ApiError) => void) {

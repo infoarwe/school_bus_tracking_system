@@ -1,0 +1,114 @@
+# School Bus Tracking: admin web + API behind one HTTPS origin.
+# ${SERVER_NAME} is filled in when the container starts (nginx image envsubst).
+# nginx's own variables ($host, $remote_addr, ...) are left untouched.
+
+# Access log without query strings: the WebSocket sends its access token as ?access_token=.
+# Set in each server block: that replaces the image's default "main" format (which logs
+# the full request line) instead of adding a second log line.
+log_format sbts '$remote_addr [$time_local] "$request_method $uri $server_protocol" '
+                '$status $body_bytes_sent $request_time "$http_user_agent"';
+
+# First line of abuse protection; the API applies its own per-IP, per-user and login limits.
+# NGINX_API_RATE / NGINX_API_BURST: deploy/.env (defaults 30r/s, 60). Raise only for a load test from one machine.
+limit_req_zone $binary_remote_addr zone=sbts_api:10m rate=${NGINX_API_RATE};
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+upstream sbts_api {
+    server api:8085;
+    keepalive 32;
+}
+
+server_tokens off;
+
+# HTTP: Let's Encrypt renewals, everything else goes to HTTPS.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${SERVER_NAME};
+    access_log /var/log/nginx/access.log sbts;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${SERVER_NAME};
+    access_log /var/log/nginx/access.log sbts;
+
+    ssl_certificate     /etc/letsencrypt/live/${SERVER_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${SERVER_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # CSV imports and logos; the API enforces its own, smaller limits.
+    client_max_body_size 12m;
+
+    gzip on;
+    gzip_types application/json application/javascript text/css image/svg+xml application/yaml;
+
+    # Live tracking WebSocket (wss://). The server pings every 25 s.
+    location = /api/v1/ws {
+        include /etc/nginx/snippets/security-headers.conf;
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        proxy_buffering off;
+        proxy_pass http://sbts_api;
+    }
+
+    # REST API.
+    location /api/ {
+        include /etc/nginx/snippets/security-headers.conf;
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_set_header Connection "";
+        limit_req zone=sbts_api burst=${NGINX_API_BURST} nodelay;
+        limit_req_status 429;
+        proxy_read_timeout 120s; # CSV report exports
+        proxy_pass http://sbts_api;
+    }
+
+    # Health check and API docs (the mobile team uses /docs).
+    location ~ ^/(health|docs|openapi\.yaml)$ {
+        include /etc/nginx/snippets/security-headers.conf;
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_set_header Connection "";
+        proxy_pass http://sbts_api;
+    }
+
+    # Admin web: hashed assets cache forever, index.html never.
+    root /usr/share/nginx/html;
+
+    location /assets/ {
+        include /etc/nginx/snippets/security-headers.conf;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    location / {
+        include /etc/nginx/snippets/security-headers.conf;
+        add_header Cache-Control "no-cache" always;
+        # Admin tokens are in localStorage, so limit what injected markup could do. Enforced:
+        # directives that cannot break the app. Report-only: the full policy (Google Maps,
+        # OpenStreetMap tiles, WebSocket). Check the browser console for violations with a
+        # school that uses Google Maps, then move it into the enforced header.
+        add_header Content-Security-Policy "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
+        add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' https://maps.googleapis.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://*.googleapis.com https://*.gstatic.com https://*.google.com https://*.ggpht.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' wss://${SERVER_NAME} https://*.googleapis.com https://*.google.com https://*.gstatic.com; worker-src blob:; frame-src https://*.google.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
+        try_files $uri /index.html;
+    }
+}

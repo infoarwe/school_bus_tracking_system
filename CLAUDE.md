@@ -32,11 +32,12 @@ Chosen:
 - Push provider: FCM HTTP v1. **Each school has its own branded apps (own name, logo) and its own Firebase project**: the School/Super Admin uploads the school's service-account JSON in Settings → Push notifications (`PUT /schools/{id}/settings/push`); it is validated, stored AES-GCM encrypted (`schools.fcm_credentials_enc`), never returned or audit-logged. `notify.SchoolSenders` sends each push through its school's project (cached per key version). Optional server-wide fallback key file for schools without one: `backend/secrets/firebase-service-account.json` (git-ignored) or `FCM_CREDENTIALS_FILE`; a broken fallback file stops the API at start-up; one Firebase project for all schools (shared apps). Without it pushes are only logged (`notify.LogSender`).
 - Android apps: Kotlin, built by the mobile team (not in this repo)
 - Maps & GPS: Google Maps, with **a different key per school** (Settings → Maps, `PUT /schools/{id}/settings/maps`). The browser key draws admin maps (`GoogleRouteMap`); a school without one falls back to Leaflet + OpenStreetMap (`LeafletRouteMap`); `RouteMap` picks. The server key is for ETA routing (Sprint 6): stored AES-GCM encrypted with `DATA_ENCRYPTION_KEY` (`internal/secrets`), never returned by the API or written to the audit log.
-- Deployment: Docker on Linux behind Nginx; monitoring with Prometheus + Grafana.
+- Deployment: Docker on Linux behind Nginx; monitoring with Prometheus + Grafana. Files in `deploy/` (Compose, Nginx HTTPS/WSS, backup script, `deploy/README.md`); monitoring not set up yet.
+- File storage (school logos): `internal/storage` `Store` interface; only local disk today (`STORAGE_DRIVER=local`, `UPLOAD_DIR`, a Docker volume in deployment, backed up by `deploy/scripts/backup.sh`). S3/MinIO = a new `Store` implementation, no handler changes.
 
 Not yet decided (fill in when chosen):
 - OTP/SMS provider: `TODO` (dev uses a fixed OTP via `OTP_DEV_CODE`; real SMS needed before go-live)
-- Server/host for the shared dev environment (S2-13): `TODO`
+- Server/host and DNS name for the shared dev environment (S2-13): `TODO` (deployment files are ready in `deploy/`)
 
 ## Repository layout
 
@@ -47,6 +48,7 @@ Not yet decided (fill in when chosen):
 - `frontend/`: React admin web (`src/{components,context,layouts,pages,routes,services,styles,utils}`); `src/routes/menu.tsx` lists the sidebar pages
 - `backend/api/openapi.yaml`: the API contract, embedded and served at `/docs` (Swagger UI) and `/openapi.yaml`
 - `docker-compose.yml`: local Postgres + Redis
+- `deploy/`: server deployment (Compose for Postgres + Redis + API + Nginx, `backend/Dockerfile`, `deploy/nginx/`, backups); read `deploy/README.md`
 - `docs/SPRINT_PLAN.md`: sprint and task plan; tick tasks there as they complete
 
 ## Commands
@@ -58,8 +60,10 @@ docker compose up -d                       # Postgres + Redis
 cd backend && cp .env.example .env         # first time only
 go run ./cmd/migrate up                    # also: down, status, redo
 go run ./cmd/seed                          # demo schools + users (idempotent; refuses in production)
+go run ./cmd/admin create-super-admin --email … --name …   # first Super Admin on an empty DB (any env; password prompted, never a flag; audited)
 go run ./cmd/api                           # http://localhost:8085/health, API docs at /docs
 go run ./cmd/simulate -end                 # drive the demo bus along its route (needs OTP_DEV_CODE); see -h
+go run ./cmd/loadtest -buses 200 -parents 1000 -yes   # S9-03 load test; creates data: throwaway stack only (deploy/README.md)
 go vet ./... && go test ./...              # integration tests skip unless TEST_DATABASE_URL is set:
 TEST_DATABASE_URL='postgres://sbts:sbts@localhost:5433/sbts_test?sslmode=disable' go test -p 1 ./...
 cd frontend && npm install && npm run dev  # http://localhost:5180 (proxies /api, /health)
@@ -257,6 +261,8 @@ Advanced analytics, attendance automation and additional integrations. Do not bu
 - Audit: write through `a.audit(ctx, q, r, store.AuditEntry{...})` inside the same transaction as the change.
 - Sessions: 15 min JWT access token + 30 day opaque refresh token (stored hashed, rotated on every refresh).
 - Integration tests in `internal/router/router_test.go` cover isolation and permissions; add a case there for every new school-scoped resource.
+- `internal/router/isolation_test.go` (S9-02) walks every route: a new endpoint fails it until it is classified (public / super / school / caller). For each one it checks, as every role of school A, that school B's paths 404, that B's record IDs answer exactly like random IDs, and that none of B's rows change. When adding a route with a new `{xxxID}` parameter, add a school-B record for it in `newTenant`.
+- Rate limits (S9-01, `internal/ratelimit`, Redis fixed windows, fail open if Redis is down): per IP on all `/api/v1`, per user after `Authenticate`, a stricter per-IP budget on the auth endpoints, and per-account limits in the Login/2FA/OTP-verify handlers (`a.allow`). Over the limit: `429 rate_limited` + `Retry-After`. Client IP = `middleware.ClientIP`; proxy headers are used only with `TRUST_PROXY_HEADERS=true` (behind Nginx).
 
 ### Domain implementation notes
 
@@ -282,11 +288,13 @@ Advanced analytics, attendance automation and additional integrations. Do not bu
 - Audit viewer: `/schools/{id}/audit-logs` (Transport Manager: transport entity types only) and `/audit-logs` (Super Admin, platform-wide). Deactivating a school is a critical action: requires `confirm_code` = the school code.
 - Background jobs (`internal/jobs`, run by every API instance): stale sweep every 30 s (`bus_stale` once per outage, per-school `stale_after_seconds`), GPS history retention hourly.
 - Tests use miniredis (no Redis server needed); WebSocket tests run against `httptest.NewServer`.
+- Branding (S8-09, `handlers/branding.go`): app name, colours and logo per school on `schools.brand_*`. Staff read `/schools/{id}/settings/branding`; Super/School Admin change it (audited). Apps call caller-scoped `GET /branding`. Logos: multipart field `logo`, type checked from content (PNG/JPEG/WebP), 16–4096 px, re-encoded (strips metadata; WebP → PNG), stored under a random name; served without a token at `/api/v1/branding/logos/{file}` only while it is some school's current logo. Upload writes the file first and deletes it if the transaction fails; the old file is deleted after commit.
 - Drivers get per-stop student **counts** only, never student names (rule 7 / privacy). Parents get bus number and driver name, never the driver's mobile.
 
 ### Backend
 
-- `gofmt`/`goimports`, `go vet`, golangci-lint (`backend/.golangci.yml`).
+- `gofmt`/`goimports`, `go vet`, golangci-lint (`backend/.golangci.yml`). `go.mod` pins `toolchain go1.26.9` (stdlib security fixes); keep it and the `golang:` image in `backend/Dockerfile` on the latest patch release, and run `govulncheck ./...` before releases. Security review findings: `docs/SECURITY_REVIEW.md`.
+- New web passwords: `auth.PasswordProblem` (8 characters to 72 bytes, the bcrypt limit).
 - Handlers stay thin: decode → validate → call service → respond with `httpx`.
 - Pass `context.Context` through to every DB/Redis call. Wrap errors with `fmt.Errorf("...: %w", err)`.
 - Schema changes only via new goose migrations; never edit an applied one. Every table has `id uuid default gen_random_uuid()`, `created_at`, `updated_at` (with the `set_updated_at()` trigger), and `school_id` when tenant-owned.

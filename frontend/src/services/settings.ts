@@ -1,4 +1,4 @@
-import { getData, send } from './api'
+import { api, getData, send } from './api'
 
 export interface MapsSettings {
   /** Loads Google Maps in the admin web. Empty = OpenStreetMap is used. */
@@ -57,4 +57,39 @@ export const pushSettingsApi = {
       'post',
       `/api/v1/schools/${schoolId}/settings/push/test`,
     ),
+}
+
+/** The school's white-label app branding (S8-09). null = the app's default. */
+export interface Branding {
+  school_id: string
+  school_name: string
+  /** As set; '' = not set (the apps show the school name). */
+  app_name: string
+  display_name: string
+  primary_color: string | null
+  secondary_color: string | null
+  /** Path on the API origin; resolve with apiUrl(). */
+  logo_url: string | null
+  updated_at: string | null
+}
+
+export const brandingApi = {
+  get: (schoolId: string) => getData<Branding>(`/api/v1/schools/${schoolId}/settings/branding`),
+  /** Empty strings reset to the app default. */
+  update: (
+    schoolId: string,
+    body: { app_name: string; primary_color: string; secondary_color: string },
+  ) => send<Branding>('put', `/api/v1/schools/${schoolId}/settings/branding`, body),
+  uploadLogo: async (schoolId: string, file: File) => {
+    const form = new FormData()
+    form.append('logo', file)
+    const res = await api.put<{ data: Branding }>(
+      `/api/v1/schools/${schoolId}/settings/branding/logo`,
+      form,
+      { timeout: 60000 },
+    )
+    return res.data.data
+  },
+  removeLogo: (schoolId: string) =>
+    send<Branding>('delete', `/api/v1/schools/${schoolId}/settings/branding/logo`),
 }

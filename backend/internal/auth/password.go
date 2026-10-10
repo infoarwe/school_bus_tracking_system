@@ -9,6 +9,24 @@ import (
 
 const bcryptCost = 12
 
+// MinPasswordLen is the shortest password accepted for web logins (API and CLI).
+const MinPasswordLen = 8
+
+// MaxPasswordBytes: bcrypt uses at most 72 bytes and refuses longer input, so
+// longer passwords are rejected as invalid input (not a server error).
+const MaxPasswordBytes = 72
+
+// PasswordProblem returns why a new password is not acceptable, or "".
+func PasswordProblem(p string) string {
+	switch {
+	case len(p) < MinPasswordLen:
+		return "must be at least 8 characters"
+	case len(p) > MaxPasswordBytes:
+		return "must be at most 72 bytes (about 72 letters or digits)"
+	}
+	return ""
+}
+
 func HashPassword(plain string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(plain), bcryptCost)
 	return string(h), err

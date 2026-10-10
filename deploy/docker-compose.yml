@@ -1,0 +1,119 @@
+# School Bus Tracking: one-server deployment (shared dev, staging or production).
+# Postgres + Redis + API + Nginx (HTTPS, admin web, WebSocket). See deploy/README.md.
+#
+#   cd deploy && cp .env.example .env   # then fill in every value
+#   docker compose build && docker compose up -d
+#
+# Only Nginx publishes ports. Postgres, Redis and the API are reachable only on the
+# internal Docker network, which is what makes TRUST_PROXY_HEADERS=true safe.
+name: sbts
+
+x-api-image: &api-image
+  image: sbts-api:${SBTS_VERSION:-latest}
+  build:
+    context: ../backend
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sbts
+      POSTGRES_DB: sbts
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sbts -d sbts"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Live bus positions, WebSocket fan-out and rate-limit counters. Nothing here needs a backup.
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in deploy/.env}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Applies database migrations, then exits. The API starts only after it succeeds.
+  migrate:
+    <<: *api-image
+    command: ["/app/migrate", "up"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://sbts:${POSTGRES_PASSWORD}@postgres:5432/sbts?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *api-image
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:?set APP_ENV in deploy/.env}
+      PORT: "8085"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://sbts:${POSTGRES_PASSWORD}@postgres:5432/sbts?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CORS_ORIGINS: https://${SERVER_NAME:?set SERVER_NAME in deploy/.env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in deploy/.env}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY in deploy/.env}
+      OTP_DEV_CODE: ${OTP_DEV_CODE:-}
+      REQUIRE_SUPER_ADMIN_2FA: ${REQUIRE_SUPER_ADMIN_2FA:-true}
+      STORAGE_DRIVER: local
+      UPLOAD_DIR: /data/uploads
+      UPLOAD_MAX_LOGO_BYTES: ${UPLOAD_MAX_LOGO_BYTES:-1048576}
+      TRUST_PROXY_HEADERS: "true"
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_IP_PER_MINUTE: ${RATE_LIMIT_IP_PER_MINUTE:-1200}
+      RATE_LIMIT_USER_PER_MINUTE: ${RATE_LIMIT_USER_PER_MINUTE:-600}
+      RATE_LIMIT_AUTH_PER_15_MINUTES: ${RATE_LIMIT_AUTH_PER_15_MINUTES:-60}
+      RATE_LIMIT_OTP_SEND_PER_HOUR: ${RATE_LIMIT_OTP_SEND_PER_HOUR:-20}
+    volumes:
+      # School logos. Back this volume up (deploy/scripts/backup.sh).
+      - uploads:/data/uploads
+      # Optional server-wide Firebase key: deploy/secrets/firebase-service-account.json.
+      - ./secrets:/app/secrets:ro
+    expose:
+      - "8085"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: sbts-web:${SBTS_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_NAME: ${SERVER_NAME}
+      NGINX_API_RATE: ${NGINX_API_RATE:-30r/s}
+      NGINX_API_BURST: ${NGINX_API_BURST:-60}
+      NGINX_ENVSUBST_FILTER: "^(SERVER_NAME|NGINX_API_RATE|NGINX_API_BURST)$$"
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      # Certificates from certbot on the host (deploy/README.md, "HTTPS certificate").
+      - ${CERTS_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
+      - ${ACME_WEBROOT:-/var/www/certbot}:/var/www/certbot:ro
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:

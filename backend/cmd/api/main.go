@@ -20,13 +20,20 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/handlers"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/jobs"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/notify"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/ratelimit"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/router"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/storage"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/tracking"
 )
 
 func main() {
+	// `api healthcheck`: exit 0 if this container's API answers /health (Docker HEALTHCHECK;
+	// the runtime image has no shell or curl).
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck())
+	}
 	if err := run(); err != nil {
 		slog.Error("api stopped", "err", err)
 		os.Exit(1)
@@ -67,6 +74,19 @@ func run() error {
 		return fmt.Errorf("DATA_ENCRYPTION_KEY: %w", err)
 	}
 
+	files, err := storage.New(cfg.StorageDriver, cfg.UploadDir)
+	if err != nil {
+		return err
+	}
+	slog.Info("file storage ready", "driver", cfg.StorageDriver, "dir", cfg.UploadDir)
+
+	var limiter *ratelimit.Limiter
+	if cfg.RateLimitEnabled {
+		limiter = ratelimit.New(rdb, cfg.RateLimitRules())
+	} else {
+		slog.Warn("rate limiting is OFF (RATE_LIMIT_ENABLED=false)")
+	}
+
 	live := tracking.NewLive(rdb)
 	hub := tracking.NewHub(live)
 	go hub.Run(ctx)
@@ -101,6 +121,9 @@ func run() error {
 		ETA:                  tracking.NewGoogleRoutes(),
 		CheckPushKey:         handlers.CheckFCMKey,
 		WSOriginPatterns:     originHosts(cfg.CORSOrigins),
+		Limiter:              limiter,
+		Files:                files,
+		MaxLogoBytes:         cfg.MaxLogoBytes,
 		OTPTTL:               cfg.OTPTTL,
 		OTPDevCode:           cfg.OTPDevCode,
 		RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
@@ -115,6 +138,7 @@ func run() error {
 		}},
 		API:                  api,
 		RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
+		TrustProxyHeaders:    cfg.TrustProxyHeaders,
 	})
 
 	srv := &http.Server{
@@ -143,6 +167,25 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+func healthcheck() int {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8085"
+	}
+	c := &http.Client{Timeout: 3 * time.Second}
+	res, err := c.Get("http://127.0.0.1:" + port + "/health")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck: status", res.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 // originHosts turns CORS origins ("http://localhost:5180") into WebSocket origin

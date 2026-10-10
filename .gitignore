@@ -26,6 +26,10 @@ Thumbs.db
 .tmp-*
 *.log
 
+# Uploaded files in local development (UPLOAD_DIR default: backend/data/uploads)
+backend/data/
+
 # Secret files (Firebase service account, ...): never commit
 backend/secrets/*
 !backend/secrets/README.md
+deploy/secrets/

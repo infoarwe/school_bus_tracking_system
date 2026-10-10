@@ -9,7 +9,9 @@ Schools create routes with ordered stops, assign students to a route and stop, a
 
 ## Prerequisites
 
-Go 1.25+, Node 22+, Docker Desktop.
+Go 1.26+ (see `backend/go.mod`), Node 22+, Docker Desktop (on Windows it uses WSL 2).
+
+Deploying to a server (shared dev, staging, production): see [deploy/README.md](deploy/README.md).
 
 ## Run locally
 
@@ -66,5 +68,6 @@ Open **Live Tracking** in the admin web to watch the bus move. `go run ./cmd/sim
 | Format | `gofmt -w .` | `npm run format` |
 | Build | `go build ./...` | `npm run build` |
 | Migrate | `go run ./cmd/migrate up` / `down` / `status` | — |
+| First Super Admin (empty DB, any env) | `go run ./cmd/admin create-super-admin --email … --name …` (password at a hidden prompt) | — |
 
 New migration: add `backend/internal/database/migrations/NNNNN_name.sql` with `-- +goose Up` and `-- +goose Down` sections.

@@ -77,7 +77,7 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 | ✅ S2-10 | FE | Routes pages | CRUD from UI |
 | ✅ S2-11 | FE | Stop management (Leaflet + OpenStreetMap): map picker to set lat/lng, drag-to-reorder list, geofence circle on map | Stops visible in order on map |
 | ✅ S2-12 | BE+FE | Permissions: Transport Manager has full access here, Driver/Parent get none via web | RBAC tests pass |
-| S2-13 | OPS | Shared dev API environment reachable by the mobile team (HTTPS URL, seeded demo school, test driver + parent accounts) | Mobile team calls `/health` from a device |
+| ◐ S2-13 | OPS | Shared dev API environment reachable by the mobile team (HTTPS URL, seeded demo school, test driver + parent accounts). Deployment files ready and tested locally (`deploy/`: Docker Compose, Nginx HTTPS/WSS, backups; see `deploy/README.md`). Waiting for: server, DNS name | Mobile team calls `/health` from a device |
 
 ---
 
@@ -196,7 +196,7 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 | ✅ S8-06 | BE+FE | Audit log viewer: Super = all, School = own school, Transport = transport actions | Scope tests pass |
 | ◐ S8-07 | BE+FE | Settings: school-level done (maps keys, Firebase key, default arrival radius, approaching distance, GPS retention, offline threshold, school location). Platform-wide Super Admin settings: none needed yet | Settings take effect |
 | ✅ S8-08 | BE | Super Admin critical actions require confirmation (e.g., delete school) | Confirm step + audited |
-| S8-09 | BE+FE | Per-school branding for the white-label apps: app name, logo, colours (needs file storage for logos); API for the apps to fetch their school's branding | Each school's apps show its own brand |
+| ◐ S8-09 | BE+FE+API | Per-school branding for the white-label apps: app name, logo, colours (needs file storage for logos); API for the apps to fetch their school's branding. Done on our side (not merged yet): Settings → App branding, `GET /branding` (mobile handoff 7, API 0.10.0), logos in `internal/storage` (local disk). Waiting for: mobile team to use it in the apps | Each school's apps show its own brand |
 
 ---
 
@@ -206,10 +206,10 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 
 | ID | Tag | Task | Done when |
 |---|---|---|---|
-| S9-01 | BE | API rate limiting (per IP + per user), OTP abuse protection | Limits enforced |
-| S9-02 | BE | Tenant isolation test suite: every endpoint × every role × cross-school | All pass |
-| S9-03 | BE | Load test: N buses × 1 point every 5 s + M WS clients | Meets target latency |
-| S9-04 | ALL | Security review: input validation, secrets, HTTPS/WSS, CORS, token storage | Issues fixed |
+| S9-01 | BE | API rate limiting (per IP + per user), OTP abuse protection. Implemented, tests pass (`TestRateLimits`, `internal/ratelimit`); tick on merge | Limits enforced |
+| S9-02 | BE | Tenant isolation test suite: every endpoint × every role × cross-school. Implemented, all pass (`isolation_test.go`); tick on merge | All pass |
+| ◐ S9-03 | BE | Load test: N buses × 1 point every 5 s + M WS clients. Tool: `backend/cmd/loadtest` (target GPS upload p95 < 300 ms). Local Docker run, 200 buses + 1000 parents, 3 min: upload p95 46 ms, live-update p95 40 ms, but **failed**: 1740 Nginx 429s (all simulated phones share one IP; limit now configurable for tests) and 457 parent WebSockets failed on the client side (cause under investigation). Rerun needed | Meets target latency |
+| ◐ S9-04 | ALL | Security review: input validation, secrets, HTTPS/WSS, CORS, token storage. Backend/web review done (`docs/SECURITY_REVIEW.md`): 7 findings fixed with tests, govulncheck 0 reachable, npm audit 0. Open: enforce full CSP after a browser check (A), admin tokens in localStorage (B), refresh-token reuse detection (C), low items D–H. Mobile app review: mobile team | Issues fixed |
 | S9-05 | MOB | Battery/permission handling, Android background location policies, Play Store prep | Approved build |
 | S9-06 | OPS | Staging + production deploy, backups, monitoring/alerting, logs | Deployed |
 | S9-07 | ALL | UAT with one pilot school: full flow Route → … → Trip end | Sign-off |

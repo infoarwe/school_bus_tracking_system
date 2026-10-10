@@ -1,0 +1,10 @@
+# Never send secrets or local data into the image build.
+.env
+.env.*
+!.env.example
+secrets/
+data/
+bin/
+*.test
+*.out
+coverage.*

@@ -78,6 +78,13 @@ func ListSchoolUsers(ctx context.Context, q DBTX, schoolID string, f UserFilter,
 	return out, total, rows.Err()
 }
 
+// SuperAdminExists reports whether any Super Admin account exists, whatever its status.
+func SuperAdminExists(ctx context.Context, q DBTX) (bool, error) {
+	var ok bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE role = 'super_admin')`).Scan(&ok)
+	return ok, err
+}
+
 type UserInput struct {
 	SchoolID     *string
 	Role         models.Role

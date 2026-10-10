@@ -11,6 +11,7 @@ import {
   InputNumber,
   Typography,
 } from 'antd'
+import BrandingSettingsCard from '../components/BrandingSettingsCard'
 import LoadingOrError from '../components/LoadingOrError'
 import PageHeader from '../components/PageHeader'
 import PushSettingsCard from '../components/PushSettingsCard'
@@ -32,6 +33,7 @@ export default function SettingsPage() {
           <MapsSettingsCard schoolId={schoolId} />
           <TrackingSettingsCard schoolId={schoolId} />
           <PushSettingsCard schoolId={schoolId} />
+          <BrandingSettingsCard schoolId={schoolId} />
         </Flex>
       )}
     </RequireSchool>

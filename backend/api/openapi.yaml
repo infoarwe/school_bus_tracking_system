@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.9.0
+  version: 0.10.2
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -103,6 +103,21 @@ info:
       notified), and an emergency with `POST /driver/trips/{id}/emergency` (the school's staff are alerted at once;
       parents are not notified automatically).
 
+    ## Rate limits
+    Over a limit the API answers `429` with code `rate_limited` and a `Retry-After` header (seconds). Wait that long
+    before retrying; never retry in a tight loop. Default limits (the server may be configured differently):
+
+    | Scope | Limit |
+    |---|---|
+    | Every `/api/v1` request, per client IP | 1200 per minute |
+    | Every authenticated request, per user | 600 per minute |
+    | `/auth/login`, `/auth/login/2fa`, `/auth/otp/send`, `/auth/otp/verify`, `/auth/refresh` together, per client IP | 60 per 15 minutes |
+    | `/auth/otp/send`, per client IP | 20 per hour (plus `otp_too_soon` / `otp_rate_limited` per number) |
+    | Password and 2FA attempts, per account | 10 per 15 minutes |
+    | `/auth/otp/verify`, per mobile number and app | 10 per 15 minutes |
+
+    The Driver app's GPS upload (one batch every 5–10 s) is far below these limits. `/health` is not limited.
+
     ## Error codes you should handle
     | Code | Status | Meaning |
     |---|---|---|
@@ -116,12 +131,20 @@ info:
     | `not_found` | 404 | Missing or belongs to another school. |
     | `conflict` | 409 | Duplicate; see `fields`. |
     | `otp_too_soon`, `otp_rate_limited` | 429 | Wait before requesting another code. |
+    | `rate_limited` | 429 | Too many requests: wait `Retry-After` seconds, then retry (see Rate limits). |
+    | `invalid_upload` | 400 | A file upload was not `multipart/form-data`. |
     | `invalid_transition`, `not_trip_day`, `another_trip_in_progress`, `status_changed` | 409 | Trip action not allowed now; refresh the trip. |
     | `driver_profile_missing` | 404 | Driver login has no driver profile; contact the school. |
     | `trip_not_started` | 409 | Stop sending GPS: the trip is not in progress. |
     | `live_unavailable` | 503 | Keep GPS points queued and retry. |
 
     ## Changelog
+    - 0.10.2 (S9-04): new web passwords are limited to 72 bytes (`400 validation_failed`, was a 500); ending a session is
+      audited. Admin web only; no mobile-facing change.
+    - 0.10.1 (S9-01): rate limits (see Rate limits): new `429 rate_limited` error with a `Retry-After` header on any
+      endpoint. No request or response format changed.
+    - 0.10.0 (S8-09): **mobile handoff 7**: `GET /branding` (the caller's school's app name, colours and logo) and
+      `GET /branding/logos/{file}` (no token). Admin: Settings → App branding (name, colours, logo upload).
     - 0.9.0 (Sprint 8): dashboard, reports (JSON + CSV), trip GPS track, audit log viewer, school deactivation confirm, default stop radius.
     - 0.8.1: per-school Firebase key (Settings → Push notifications); each school's apps use their own Firebase project.
     - 0.8.0 (Sprint 7): **mobile handoff 6**: `POST /devices`, push payloads (see Push notifications), parent inbox,
@@ -168,6 +191,8 @@ tags:
   - name: Dashboard & reports
   - name: Audit
   - name: Settings
+  - name: Branding
+    description: Each school's app name, colours and logo for its white-label apps.
   - name: System
 security:
   - bearerAuth: []
@@ -258,6 +283,7 @@ paths:
                   data: { $ref: "#/components/schemas/Tokens" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/auth/login:
@@ -289,6 +315,7 @@ paths:
                   data: { $ref: "#/components/schemas/LoginResult" }
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/auth/login/2fa:
@@ -318,6 +345,7 @@ paths:
                 properties:
                   data: { $ref: "#/components/schemas/LoginResult" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/auth/refresh:
     post:
@@ -345,6 +373,7 @@ paths:
                 properties:
                   data: { $ref: "#/components/schemas/Tokens" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/auth/logout:
@@ -602,7 +631,7 @@ paths:
                   required: [role, password]
                   properties:
                     role: { type: string, enum: [school_admin, transport_manager] }
-                    password: { type: string, minLength: 8 }
+                    password: { type: string, minLength: 8, maxLength: 72, description: "8 characters to 72 bytes." }
       responses:
         "201":
           description: Created.
@@ -702,7 +731,7 @@ paths:
               type: object
               required: [password]
               properties:
-                password: { type: string, minLength: 8 }
+                password: { type: string, minLength: 8, maxLength: 72, description: "8 characters to 72 bytes." }
       responses:
         "204": { description: Password changed. }
         "400": { $ref: "#/components/responses/ValidationFailed" }
@@ -2404,6 +2433,141 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/v1/branding:
+    get:
+      tags: [Branding]
+      summary: My school's app branding (Driver app, Parent app, school staff)
+      description: |
+        The app name, colours and logo of the caller's own school, for the school's white-label apps. Call it after
+        login and on app start; `updated_at` changes whenever the school edits its branding. `null` colours or
+        `logo_url` mean "use the app's built-in default". Show `display_name` (the app name, or the school name
+        when none is set). Super Admin has no school and gets `403`.
+      operationId: getMyBranding
+      responses:
+        "200":
+          description: Branding.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Branding" } } }
+              example:
+                data:
+                  school_id: 4f1d2a3b-0000-4000-8000-000000000002
+                  school_name: Demo Public School
+                  app_name: Demo School Bus
+                  display_name: Demo School Bus
+                  primary_color: "#1A73E8"
+                  secondary_color: "#FFAA00"
+                  logo_url: /api/v1/branding/logos/3f9c0a6e1b2d4c5e8f7a9b0c1d2e3f40.png
+                  updated_at: "2026-10-10T05:30:00Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/branding/logos/{file}:
+    parameters:
+      - name: file
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{32}\.(png|jpg)$' }
+    get:
+      tags: [Branding]
+      summary: A school's logo image (no token needed)
+      description: |
+        Use `logo_url` from the branding response, prefixed with the API origin
+        (e.g. `https://api.example.com` + `logo_url`). No `Authorization` header is needed, so any image loader works.
+        The file name is random and never reused: cache the image for as long as `logo_url` is unchanged. A replaced or
+        removed logo returns `404`.
+      operationId: getBrandingLogo
+      security: []
+      responses:
+        "200":
+          description: The image (`image/png` or `image/jpeg`).
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/settings/branding:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Branding]
+      summary: The school's app branding (staff)
+      operationId: getBrandingSettings
+      responses:
+        "200":
+          description: Branding.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Branding" } } }
+    put:
+      tags: [Branding]
+      summary: Set the app name and colours (Super Admin, School Admin)
+      description: Empty strings reset a field to the app default. Colours are returned upper-case. Audited.
+      operationId: updateBrandingSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                app_name: { type: string, maxLength: 60 }
+                primary_color: { type: string, pattern: '^(#[0-9A-Fa-f]{6})?$', example: "#1A73E8" }
+                secondary_color: { type: string, pattern: '^(#[0-9A-Fa-f]{6})?$', example: "#FFAA00" }
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Branding" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/settings/branding/logo:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    put:
+      tags: [Branding]
+      summary: Upload or replace the school's logo (Super Admin, School Admin)
+      description: |
+        `multipart/form-data` with one file field `logo`: PNG, JPEG or WebP, at most 1 MB by default
+        (`UPLOAD_MAX_LOGO_BYTES`), 16–4096 pixels per side. The type is checked from the file's content, and the image
+        is re-encoded before it is stored (metadata removed; WebP becomes PNG). The previous logo stops being served.
+        Audited. Errors: `400 validation_failed` (`fields.logo`) or `400 invalid_upload` (not a multipart body).
+      operationId: uploadBrandingLogo
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [logo]
+              properties:
+                logo: { type: string, format: binary }
+      responses:
+        "200":
+          description: Saved; `logo_url` is the new logo.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Branding" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Branding]
+      summary: Remove the school's logo (Super Admin, School Admin)
+      description: The apps show their built-in logo. Removing when there is none is not an error.
+      operationId: deleteBrandingLogo
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Branding" } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/schools/{schoolID}/dashboard:
     parameters:
       - { $ref: "#/components/parameters/SchoolID" }
@@ -2575,6 +2739,18 @@ components:
     PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
 
   schemas:
+    Branding:
+      type: object
+      required: [school_id, school_name, app_name, display_name, primary_color, secondary_color, logo_url, updated_at]
+      properties:
+        school_id: { type: string, format: uuid }
+        school_name: { type: string }
+        app_name: { type: string, description: 'As set by the school; "" = not set.' }
+        display_name: { type: string, description: "The name to show: app_name, or the school name." }
+        primary_color: { type: [string, "null"], description: "#RRGGBB, or null for the app default.", example: "#1A73E8" }
+        secondary_color: { type: [string, "null"], description: "#RRGGBB, or null for the app default." }
+        logo_url: { type: [string, "null"], description: "Path on the API origin; null = no logo." }
+        updated_at: { type: [string, "null"], format: date-time }
     AuditRow:
       type: object
       properties:
@@ -3307,7 +3483,11 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
           example: { error: { code: conflict, message: A record with this email already exists., fields: { email: already exists } } }
     TooManyRequests:
-      description: Rate limited.
+      description: "Rate limited (`rate_limited`, or for OTP `otp_too_soon` / `otp_rate_limited`)."
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying (sent with `rate_limited`).
+          schema: { type: integer }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

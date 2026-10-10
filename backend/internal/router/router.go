@@ -12,6 +12,7 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/httpx"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/middleware"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/models"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/ratelimit"
 )
 
 type Deps struct {
@@ -19,7 +20,19 @@ type Deps struct {
 	Health               *handlers.HealthHandler
 	API                  *handlers.API
 	RequireSuperAdmin2FA bool
+	// TrustProxyHeaders takes the client IP from X-Real-IP / X-Forwarded-For. Turn
+	// on only behind a proxy (Nginx) that overwrites them and when the API port is
+	// not reachable directly; otherwise clients could fake their IP.
+	TrustProxyHeaders bool
 }
+
+// Rate limit keys: the client IP, the authenticated user.
+var (
+	ipRule        = func(r *ratelimit.Rules) ratelimit.Rule { return r.IP }
+	userRule      = func(r *ratelimit.Rules) ratelimit.Rule { return r.User }
+	authRule      = func(r *ratelimit.Rules) ratelimit.Rule { return r.Auth }
+	otpSendIPRule = func(r *ratelimit.Rules) ratelimit.Rule { return r.OTPSendIP }
+)
 
 var (
 	superAdmin = middleware.RequireRoles(models.RoleSuperAdmin)
@@ -35,7 +48,9 @@ func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
-	r.Use(chimw.RealIP)
+	if d.TrustProxyHeaders {
+		r.Use(chimw.RealIP)
+	}
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recover)
 	r.Use(cors.Handler(cors.Options{
@@ -60,18 +75,27 @@ func New(d Deps) http.Handler {
 
 	a := d.API
 	r.Route("/api/v1", func(r chi.Router) {
+		// S9-01: every API request counts against the client IP's limit.
+		r.Use(middleware.RateLimit(a.Limiter, ipRule, middleware.ClientIP))
+
 		// Live tracking WebSocket: authenticates itself (?access_token=), see handlers/ws.go.
 		r.Get("/ws", a.LiveSocket)
 
-		// Public: login flows.
-		r.Post("/auth/login", a.Login)
-		r.Post("/auth/login/2fa", a.Login2FA)
-		r.Post("/auth/otp/send", a.SendOTP)
-		r.Post("/auth/otp/verify", a.VerifyOTP)
-		r.Post("/auth/refresh", a.Refresh)
+		// Public: login flows, with a stricter per-IP budget (per-account limits are in the handlers).
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RateLimit(a.Limiter, authRule, middleware.ClientIP))
+			r.Post("/auth/login", a.Login)
+			r.Post("/auth/login/2fa", a.Login2FA)
+			r.With(middleware.RateLimit(a.Limiter, otpSendIPRule, middleware.ClientIP)).Post("/auth/otp/send", a.SendOTP)
+			r.Post("/auth/otp/verify", a.VerifyOTP)
+			r.Post("/auth/refresh", a.Refresh)
+		})
+		// School logos: public so image loaders work; unguessable names (handlers/branding.go).
+		r.Get("/branding/logos/{file}", a.BrandingLogo)
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authenticate(a.Tokens, a.Store))
+			r.Use(middleware.RateLimit(a.Limiter, userRule, middleware.UserKey))
 
 			// Allowed before a Super Admin has set up 2FA.
 			r.Get("/auth/me", a.Me)
@@ -88,6 +112,9 @@ func New(d Deps) http.Handler {
 				// Driver and Parent apps: scoped to the caller, no school ID in the path.
 				r.With(middleware.RequireRoles(models.AppRoles...)).Post("/devices", a.RegisterDevice)
 				r.With(middleware.RequireRoles(models.AppRoles...)).Post("/devices/unregister", a.UnregisterDevice)
+				// The caller's own school's branding (apps and staff; Super Admin has no school).
+				r.With(middleware.RequireRoles(models.RoleDriver, models.RoleParent, models.RoleSchoolAdmin,
+					models.RoleTransportManager)).Get("/branding", a.AppBranding)
 				r.Route("/driver", func(r chi.Router) {
 					r.Use(middleware.RequireRoles(models.RoleDriver))
 					r.Get("/me", a.DriverMe)
@@ -131,6 +158,10 @@ func New(d Deps) http.Handler {
 					r.With(userAdmins).Post("/settings/push/test", a.TestPushSettings)
 					r.With(webRoles).Get("/settings/tracking", a.GetTrackingSettings)
 					r.With(userAdmins).Put("/settings/tracking", a.UpdateTrackingSettings)
+					r.With(webRoles).Get("/settings/branding", a.GetBrandingSettings)
+					r.With(userAdmins).Put("/settings/branding", a.UpdateBrandingSettings)
+					r.With(userAdmins).Put("/settings/branding/logo", a.UploadBrandingLogo)
+					r.With(userAdmins).Delete("/settings/branding/logo", a.DeleteBrandingLogo)
 					r.With(webRoles).Get("/live", a.LiveSnapshot)
 
 					r.Route("/users", func(r chi.Router) {

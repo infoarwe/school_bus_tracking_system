@@ -19,8 +19,6 @@ var staffRoles = []models.Role{models.RoleSchoolAdmin, models.RoleTransportManag
 
 var userConflicts = map[string]string{"users_email_key": "email", "users_mobile_role_key": "mobile"}
 
-const minPasswordLen = 8
-
 // canManage: Super Admin manages School Admins and Transport Managers;
 // a School Admin manages Transport Managers only.
 func canManage(p *auth.Principal, target models.Role) bool {
@@ -87,7 +85,9 @@ func (a *API) CreateSchoolUser(w http.ResponseWriter, r *http.Request) {
 	v := validate.New()
 	req.validate(v)
 	v.OneOf("role", req.Role, string(models.RoleSchoolAdmin), string(models.RoleTransportManager))
-	v.Check(len(req.Password) >= minPasswordLen, "password", "must be at least 8 characters")
+	if msg := auth.PasswordProblem(req.Password); msg != "" {
+		v.Check(false, "password", msg)
+	}
 	if !v.OK() {
 		httpx.ValidationError(w, v.Errors())
 		return
@@ -214,8 +214,8 @@ func (a *API) ResetSchoolUserPassword(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, &req) {
 		return
 	}
-	if len(req.Password) < minPasswordLen {
-		httpx.ValidationError(w, validate.Errors{"password": "must be at least 8 characters"})
+	if msg := auth.PasswordProblem(req.Password); msg != "" {
+		httpx.ValidationError(w, validate.Errors{"password": msg})
 		return
 	}
 	hash, err := auth.HashPassword(req.Password)
