@@ -20,16 +20,13 @@
     "@vis.gl/react-google-maps": "^1.10.1",
     "antd": "^6.6.5",
     "axios": "^1.20.0",
-    "leaflet": "^1.9.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "react-leaflet": "^5.0.0",
     "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/google.maps": "^3.66.5",
-    "@types/leaflet": "^1.9.22",
     "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

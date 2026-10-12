@@ -11,7 +11,8 @@ type Alert struct {
 	ID         string    `json:"id"`
 	TripID     string    `json:"trip_id"`
 	TripType   string    `json:"trip_type"`
-	RouteCode  string    `json:"route_code"`
+	RouteCode  string    `json:"route_code"` // "" for a routeless Special Trip/Outing: see Title
+	Title      string    `json:"title"`      // the outing's name; "" for route-based trips
 	BusNumber  string    `json:"bus_number"`
 	DriverName string    `json:"driver_name"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -31,9 +32,13 @@ type Alert struct {
 	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
 }
 
+// routes is LEFT JOINed: a Special Trip/Outing may be routeless (ad-hoc waypoints
+// instead), and its delays/emergencies must still be reportable and visible to
+// staff (an INNER JOIN here would silently make GetDelayAlert/GetEmergencyAlert
+// return not-found for a routeless trip, breaking delay/emergency reporting for it).
 const tripInfoJoins = `
 	JOIN trips t ON t.id = x.trip_id
-	JOIN routes r ON r.id = t.route_id
+	LEFT JOIN routes r ON r.id = t.route_id
 	JOIN buses b ON b.id = t.bus_id
 	JOIN drivers d ON d.id = t.driver_id
 	JOIN users du ON du.id = d.user_id
@@ -48,7 +53,7 @@ func scanAlerts(ctx context.Context, q DBTX, sql string, args ...any) ([]Alert, 
 	out := []Alert{}
 	for rows.Next() {
 		var a Alert
-		if err := rows.Scan(&a.Kind, &a.ID, &a.TripID, &a.TripType, &a.RouteCode, &a.BusNumber, &a.DriverName,
+		if err := rows.Scan(&a.Kind, &a.ID, &a.TripID, &a.TripType, &a.RouteCode, &a.Title, &a.BusNumber, &a.DriverName,
 			&a.CreatedAt, &a.ReportedBy, &a.Minutes, &a.Reason, &a.Note, &a.Message, &a.Latitude, &a.Longitude,
 			&a.Status, &a.AcknowledgedAt, &a.ResolvedAt); err != nil {
 			return nil, err
@@ -58,11 +63,11 @@ func scanAlerts(ctx context.Context, q DBTX, sql string, args ...any) ([]Alert, 
 	return out, rows.Err()
 }
 
-const delaySelect = `SELECT 'delay', x.id, x.trip_id, t.trip_type, r.code, b.vehicle_number, du.name, x.created_at, rep.name,
+const delaySelect = `SELECT 'delay', x.id, x.trip_id, t.trip_type, coalesce(r.code, ''), t.title, b.vehicle_number, du.name, x.created_at, rep.name,
 	x.minutes, x.reason, x.note, NULL::text, NULL::float8, NULL::float8, NULL::text, NULL::timestamptz, NULL::timestamptz
 	FROM delay_events x` + tripInfoJoins
 
-const emergencySelect = `SELECT 'emergency', x.id, x.trip_id, t.trip_type, r.code, b.vehicle_number, du.name, x.created_at, rep.name,
+const emergencySelect = `SELECT 'emergency', x.id, x.trip_id, t.trip_type, coalesce(r.code, ''), t.title, b.vehicle_number, du.name, x.created_at, rep.name,
 	NULL::int, NULL::text, NULL::text, x.message, x.latitude, x.longitude, x.status, x.acknowledged_at, x.resolved_at
 	FROM emergencies x` + tripInfoJoins
 
@@ -143,7 +148,7 @@ func SchoolAlerts(ctx context.Context, q DBTX, schoolID string) ([]Alert, error)
 			UNION ALL
 			`+delaySelect+` JOIN schools s ON s.id = x.school_id
 			WHERE x.school_id = $1 AND (x.created_at AT TIME ZONE s.timezone)::date = (now() AT TIME ZONE s.timezone)::date
-		) a ORDER BY 8 DESC`, schoolID)
+		) a ORDER BY 9 DESC`, schoolID) // column 9 is created_at (title, added as column 6, shifted the rest)
 }
 
 func firstErr(errs ...error) error {

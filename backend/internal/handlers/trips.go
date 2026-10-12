@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,7 +23,10 @@ import (
 // Trips can be planned up to this many days ahead.
 const maxDaysAhead = 90
 
-var tripTypes = []string{models.TripMorningPickup, models.TripEveningDrop}
+var tripTypes = []string{models.TripMorningPickup, models.TripEveningDrop, models.TripSpecial}
+
+// maxWaypoints bounds a Special Trip/Outing's ad-hoc destination list.
+const maxWaypoints = 20
 
 // Unique slot indexes → the request field that clashes.
 var tripSlotConflicts = map[string]struct{ field, msg string }{
@@ -76,10 +80,28 @@ func writeTripError(w http.ResponseWriter, r *http.Request, err error) {
 type tripRequest struct {
 	TripDate string `json:"trip_date"`
 	TripType string `json:"trip_type"`
+	// RouteID is required for morning_pickup/evening_drop; optional (template) for
+	// special_trip. "" or omitted means no route — only valid for special_trip.
 	RouteID  string `json:"route_id"`
 	BusID    string `json:"bus_id"`
 	DriverID string `json:"driver_id"`
 	Notes    string `json:"notes"`
+	// Title: the outing's name, shown instead of a route name. Required for a
+	// routeless special_trip; ignored for the other two trip types.
+	Title string `json:"title"`
+	// NotifyParents: nil defaults to true (matching the DB default and the other
+	// two trip types, which always notify). Only meaningful for special_trip.
+	NotifyParents *bool             `json:"notify_parents"`
+	Waypoints     []waypointRequest `json:"waypoints"`
+}
+
+// waypointRequest is one ad-hoc destination of a special_trip, in the order given.
+type waypointRequest struct {
+	Name            string   `json:"name"`
+	Landmark        string   `json:"landmark"`
+	Latitude        *float64 `json:"latitude"`
+	Longitude       *float64 `json:"longitude"`
+	GeofenceRadiusM *int     `json:"geofence_radius_m"`
 }
 
 // validateTripDate checks YYYY-MM-DD between today (school time zone) and maxDaysAhead.
@@ -95,37 +117,71 @@ func validateTripDate(v *validate.V, field, date, today string) {
 }
 
 // validateTrip checks the date, trip type and that route, bus and driver belong to
-// the school, are active and fit the trip type.
+// the school, are active and fit the trip type. A special_trip may have no route
+// (an ad-hoc outing with its own waypoints instead); it then needs a title and at
+// least one waypoint.
 func validateTrip(ctx context.Context, q store.DBTX, schoolID string, req *tripRequest) error {
 	today, err := store.SchoolToday(ctx, q, schoolID)
 	if err != nil {
 		return err
 	}
 	req.Notes = strings.TrimSpace(req.Notes)
+	req.Title = strings.TrimSpace(req.Title)
 	v := validate.New()
 	validateTripDate(v, "trip_date", req.TripDate, today)
 	v.OneOf("trip_type", req.TripType, tripTypes...)
-	for field, id := range map[string]string{"route_id": req.RouteID, "bus_id": req.BusID, "driver_id": req.DriverID} {
+	special := req.TripType == models.TripSpecial
+	hasRoute := req.RouteID != ""
+
+	if hasRoute || !special {
+		_, err := uuid.Parse(req.RouteID)
+		v.Check(err == nil, "route_id", "is required")
+	}
+	for field, id := range map[string]string{"bus_id": req.BusID, "driver_id": req.DriverID} {
 		_, err := uuid.Parse(id)
 		v.Check(err == nil, field, "is required")
 	}
 	v.MaxLen("notes", req.Notes, 500)
+	if special && !hasRoute {
+		v.Required("title", req.Title)
+		v.MaxLen("title", req.Title, 200)
+		v.Check(len(req.Waypoints) >= 1, "waypoints", "add at least one destination")
+		v.Check(len(req.Waypoints) <= maxWaypoints, "waypoints", fmt.Sprintf("at most %d destinations", maxWaypoints))
+		for _, wp := range req.Waypoints {
+			v.Check(strings.TrimSpace(wp.Name) != "", "waypoints", "every destination needs a name")
+			v.Check(wp.Latitude != nil && *wp.Latitude >= -90 && *wp.Latitude <= 90, "waypoints", "every destination needs a valid location")
+			v.Check(wp.Longitude != nil && *wp.Longitude >= -180 && *wp.Longitude <= 180, "waypoints", "every destination needs a valid location")
+			if wp.GeofenceRadiusM != nil {
+				v.Check(*wp.GeofenceRadiusM >= minGeofenceM && *wp.GeofenceRadiusM <= maxGeofenceM,
+					"waypoints", "geofence radius must be between 25 and 1000 metres")
+			}
+		}
+	}
 	if !v.OK() {
 		return tripValidation(v.Errors())
 	}
 
-	refs, err := store.GetTripRefs(ctx, q, schoolID, req.RouteID, req.BusID, req.DriverID)
+	var routeID *string
+	if hasRoute {
+		routeID = &req.RouteID
+	}
+	refs, err := store.GetTripRefs(ctx, q, schoolID, routeID, req.BusID, req.DriverID)
 	if err != nil {
 		return err
 	}
-	v.Check(refs.RouteFound, "route_id", "route not found")
-	v.Check(!refs.RouteFound || refs.RouteStatus == models.StatusActive, "route_id", "route is inactive")
-	v.Check(!refs.RouteFound || refs.StopCount > 0, "route_id", "route has no stops yet")
-	if refs.RouteFound && req.TripType == models.TripMorningPickup {
-		v.Check(refs.SupportsPickup, "route_id", "route does not run Morning Pickup")
-	}
-	if refs.RouteFound && req.TripType == models.TripEveningDrop {
-		v.Check(refs.SupportsDrop, "route_id", "route does not run Evening Drop")
+	if hasRoute {
+		v.Check(refs.RouteFound, "route_id", "route not found")
+		v.Check(!refs.RouteFound || refs.RouteStatus == models.StatusActive, "route_id", "route is inactive")
+		v.Check(!refs.RouteFound || refs.StopCount > 0, "route_id", "route has no stops yet")
+		switch req.TripType {
+		case models.TripMorningPickup:
+			v.Check(refs.SupportsPickup, "route_id", "route does not run Morning Pickup")
+		case models.TripEveningDrop:
+			v.Check(refs.SupportsDrop, "route_id", "route does not run Evening Drop")
+			v.Check(refs.DropSequenceComplete, "route_id", "the route's Evening Drop stop order is not fully configured yet")
+		case models.TripSpecial:
+			v.Check(refs.SupportsOuting, "route_id", "route is not marked for Special Trip/Outing")
+		}
 	}
 	v.Check(refs.BusFound, "bus_id", "bus not found")
 	v.Check(!refs.BusFound || refs.BusStatus == models.StatusActive, "bus_id", "bus is not active ("+refs.BusStatus+")")
@@ -138,8 +194,37 @@ func validateTrip(ctx context.Context, q store.DBTX, schoolID string, req *tripR
 }
 
 func (req *tripRequest) input() store.TripInput {
-	return store.TripInput{TripDate: req.TripDate, TripType: req.TripType, RouteID: req.RouteID,
-		BusID: req.BusID, DriverID: req.DriverID, Notes: req.Notes}
+	var routeID *string
+	if req.RouteID != "" {
+		routeID = &req.RouteID
+	}
+	notify := true
+	if req.NotifyParents != nil {
+		notify = *req.NotifyParents
+	}
+	return store.TripInput{TripDate: req.TripDate, TripType: req.TripType, RouteID: routeID,
+		BusID: req.BusID, DriverID: req.DriverID, Notes: req.Notes, Title: req.Title, NotifyParents: notify}
+}
+
+// waypointInputs converts the request's waypoints for store.ReplaceWaypoints.
+func (req *tripRequest) waypointInputs() []store.WaypointInput {
+	out := make([]store.WaypointInput, len(req.Waypoints))
+	for i, wp := range req.Waypoints {
+		radius := defaultGeofenceM
+		if wp.GeofenceRadiusM != nil {
+			radius = *wp.GeofenceRadiusM
+		}
+		var lat, lng float64
+		if wp.Latitude != nil {
+			lat = *wp.Latitude
+		}
+		if wp.Longitude != nil {
+			lng = *wp.Longitude
+		}
+		out[i] = store.WaypointInput{Name: strings.TrimSpace(wp.Name), Landmark: strings.TrimSpace(wp.Landmark),
+			Latitude: lat, Longitude: lng, GeofenceRadiusM: radius}
+	}
+	return out
 }
 
 // changeTripStatus moves a trip to a new status inside a transaction, writing
@@ -201,10 +286,38 @@ type tripStop struct {
 	StudentCount int `json:"student_count"`
 }
 
+// tripStops returns a trip's stops (or, for a routeless special_trip, its
+// waypoints converted to the same shape) with per-stop student counts. A
+// special_trip's destinations never have students assigned (they are not
+// permanent stops), so their count is always 0.
 func (a *API) tripStops(ctx context.Context, t *models.Trip) ([]tripStop, error) {
+	if t.Route == nil {
+		wps, err := store.ListWaypoints(ctx, a.Store.Pool, t.ID)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]tripStop, len(wps))
+		for i, wp := range wps {
+			out[i] = tripStop{Stop: store.WaypointAsStop(wp)}
+		}
+		return out, nil
+	}
 	stops, err := store.ListStops(ctx, a.Store.Pool, t.Route.ID)
 	if err != nil {
 		return nil, err
+	}
+	// ListStops orders by Sequence (the Morning Pickup order). An Evening Drop
+	// trip shows its own, independently configured order instead, and only the
+	// stops that are actually part of the evening leg.
+	if t.TripType == models.TripEveningDrop {
+		evening := make([]models.Stop, 0, len(stops))
+		for _, s := range stops {
+			if s.DropSequence != nil {
+				evening = append(evening, s)
+			}
+		}
+		sort.Slice(evening, func(i, j int) bool { return *evening[i].DropSequence < *evening[j].DropSequence })
+		stops = evening
 	}
 	counts, err := store.StopStudentCounts(ctx, a.Store.Pool, t.Route.ID, t.TripType)
 	if err != nil {
@@ -257,6 +370,11 @@ func (a *API) CreateTrip(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if req.TripType == models.TripSpecial {
+			if err := store.ReplaceWaypoints(ctx, q, schoolID, id, req.waypointInputs()); err != nil {
+				return err
+			}
+		}
 		if err := store.InsertTripHistory(ctx, q, store.TripHistoryEntry{
 			TripID: id, SchoolID: schoolID, To: models.TripScheduled, ByUserID: &p.UserID, ByRole: string(p.Role),
 		}); err != nil {
@@ -303,6 +421,11 @@ func (a *API) UpdateTrip(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := store.UpdateTripAssignment(ctx, q, schoolID, id, req.input()); err != nil {
 			return err
+		}
+		if req.TripType == models.TripSpecial {
+			if err := store.ReplaceWaypoints(ctx, q, schoolID, id, req.waypointInputs()); err != nil {
+				return err
+			}
 		}
 		if before.Status == models.TripConfirmed && before.Driver.ID != req.DriverID {
 			if err := a.changeTripStatus(ctx, q, r, before, models.TripScheduled, "driver changed", "trip.reset"); err != nil {
@@ -489,9 +612,19 @@ func (a *API) CopyTrips(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, d := range req.ToDates {
 			for _, t := range source {
-				tr := tripRequest{TripDate: d, TripType: t.TripType, RouteID: t.Route.ID, BusID: t.Bus.ID, DriverID: t.Driver.ID, Notes: t.Notes}
+				routeCode := ""
+				var routeID *string
+				if t.Route != nil {
+					routeCode = t.Route.Code
+					routeID = &t.Route.ID
+				}
+				tr := tripRequest{TripDate: d, TripType: t.TripType, BusID: t.Bus.ID, DriverID: t.Driver.ID,
+					Notes: t.Notes, Title: t.Title, NotifyParents: &t.NotifyParents}
+				if routeID != nil {
+					tr.RouteID = *routeID
+				}
 				skip := func(reason string) {
-					res.Skipped = append(res.Skipped, copySkipped{TripDate: d, TripType: t.TripType, RouteCode: t.Route.Code, Reason: reason})
+					res.Skipped = append(res.Skipped, copySkipped{TripDate: d, TripType: t.TripType, RouteCode: routeCode, Reason: reason})
 				}
 				if err := validateTrip(ctx, q, schoolID, &tr); err != nil {
 					var te *tripError
@@ -504,15 +637,29 @@ func (a *API) CopyTrips(w http.ResponseWriter, r *http.Request) {
 				// Skip clashes without aborting the transaction.
 				var id string
 				err := q.QueryRow(ctx, `
-					INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id, notes, created_by)
-					VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING RETURNING id`,
-					schoolID, d, t.TripType, t.Route.ID, t.Bus.ID, t.Driver.ID, t.Notes, p.UserID).Scan(&id)
+					INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id, notes, title, notify_parents, created_by)
+					VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING RETURNING id`,
+					schoolID, d, t.TripType, routeID, t.Bus.ID, t.Driver.ID, t.Notes, t.Title, t.NotifyParents, p.UserID).Scan(&id)
 				if err != nil {
 					if errors.Is(err, pgx.ErrNoRows) { // ON CONFLICT DO NOTHING inserted nothing
 						skip("route, bus or driver already has a trip in this slot")
 						continue
 					}
 					return err
+				}
+				if t.TripType == models.TripSpecial {
+					srcWaypoints, err := store.ListWaypoints(ctx, q, t.ID)
+					if err != nil {
+						return err
+					}
+					in := make([]store.WaypointInput, len(srcWaypoints))
+					for i, wp := range srcWaypoints {
+						in[i] = store.WaypointInput{Name: wp.Name, Landmark: wp.Landmark,
+							Latitude: wp.Latitude, Longitude: wp.Longitude, GeofenceRadiusM: wp.GeofenceRadiusM}
+					}
+					if err := store.ReplaceWaypoints(ctx, q, schoolID, id, in); err != nil {
+						return err
+					}
 				}
 				if err := store.InsertTripHistory(ctx, q, store.TripHistoryEntry{
 					TripID: id, SchoolID: schoolID, To: models.TripScheduled, ByUserID: &p.UserID, ByRole: string(p.Role),
@@ -752,6 +899,9 @@ func (a *API) ParentChildTrips(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, t := range trips {
+		if t.TripType == models.TripSpecial {
+			continue // outings have no assigned pickup/drop stop for this child
+		}
 		stop := child.Assignment.PickupStop
 		if t.TripType == models.TripEveningDrop {
 			stop = child.Assignment.DropStop

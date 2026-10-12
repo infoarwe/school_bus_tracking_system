@@ -53,25 +53,30 @@ func (a *API) reportDelay(w http.ResponseWriter, r *http.Request, t *models.Trip
 		if err != nil {
 			return err
 		}
-		typ, msg := notify.TypeDelayed, notify.Delayed(req.Minutes, t.TripType)
-		if req.Reason == "bus_breakdown" {
-			typ, msg = notify.TypeBreakdown, notify.Breakdown()
-		}
-		riders, err := store.TripRiders(ctx, q, t.ID, "")
-		if err != nil {
-			return err
-		}
-		key := "delay:" + id
-		data := tripData(t)
-		data["delay_id"] = id
-		nid, created, err := notify.Notify(ctx, q, store.NotificationInput{SchoolID: t.SchoolID, Type: typ, Title: msg.Title,
-			Body: msg.Body, Data: data, TripID: &t.ID, RouteID: &t.Route.ID, DedupeKey: &key, CreatedBy: &p.UserID}, riders)
-		if err != nil {
-			return err
-		}
-		if created {
-			if err := store.SetDelayNotification(ctx, q, id, nid); err != nil {
+		// A Special Trip/Outing with notify_parents=false opts out of this
+		// notification too (the delay itself is still recorded and visible to
+		// staff below, regardless of the toggle).
+		if t.TripType != models.TripSpecial || t.NotifyParents {
+			typ, msg := notify.TypeDelayed, notify.Delayed(req.Minutes, t.TripType)
+			if req.Reason == "bus_breakdown" {
+				typ, msg = notify.TypeBreakdown, notify.Breakdown()
+			}
+			riders, err := tripRiders(ctx, q, t, "")
+			if err != nil {
 				return err
+			}
+			key := "delay:" + id
+			data := tripData(t)
+			data["delay_id"] = id
+			nid, created, err := notify.Notify(ctx, q, store.NotificationInput{SchoolID: t.SchoolID, Type: typ, Title: msg.Title,
+				Body: msg.Body, Data: data, TripID: &t.ID, RouteID: routeIDPtr(t), DedupeKey: &key, CreatedBy: &p.UserID}, riders)
+			if err != nil {
+				return err
+			}
+			if created {
+				if err := store.SetDelayNotification(ctx, q, id, nid); err != nil {
+					return err
+				}
 			}
 		}
 		if alert, err = store.GetDelayAlert(ctx, q, id); err != nil {

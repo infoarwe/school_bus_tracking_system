@@ -5,7 +5,7 @@ import { DEFAULT_CENTER, type RouteMapProps } from './routeMapTypes'
 const ORANGE = '#f5a623'
 const BLUE = '#1677ff'
 
-// Numbered circle markers, matching the OpenStreetMap version.
+// Numbered circle markers for each stop.
 function numberMarker(
   label: string,
   highlighted: boolean,
@@ -47,7 +47,14 @@ export default function GoogleRouteMap({
           if (onPick && p) onPick(Number(p.lat.toFixed(6)), Number(p.lng.toFixed(6)))
         }}
       >
-        <Overlay stops={stops} highlightId={highlightId} picked={picked} track={track} bus={bus} />
+        <Overlay
+          stops={stops}
+          highlightId={highlightId}
+          picked={picked}
+          onPick={onPick}
+          track={track}
+          bus={bus}
+        />
       </Map>
     </APIProvider>
   )
@@ -57,9 +64,10 @@ function Overlay({
   stops,
   highlightId,
   picked,
+  onPick,
   track,
   bus,
-}: Pick<RouteMapProps, 'stops' | 'highlightId' | 'picked' | 'track' | 'bus'>) {
+}: Pick<RouteMapProps, 'stops' | 'highlightId' | 'picked' | 'onPick' | 'track' | 'bus'>) {
   const path = useMemo(() => stops.map((s) => ({ lat: s.latitude, lng: s.longitude })), [stops])
   const highlighted = stops.find((s) => s.id === highlightId)
 
@@ -106,6 +114,12 @@ function Overlay({
         <>
           <Marker
             position={{ lat: picked.latitude, lng: picked.longitude }}
+            draggable={!!onPick}
+            title={onPick ? 'Drag to adjust the position' : undefined}
+            onDragEnd={(e) => {
+              const p = e.latLng
+              if (onPick && p) onPick(Number(p.lat().toFixed(6)), Number(p.lng().toFixed(6)))
+            }}
             {...numberMarker('★', true)}
           />
           <Circle

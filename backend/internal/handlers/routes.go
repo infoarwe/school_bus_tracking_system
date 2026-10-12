@@ -35,6 +35,7 @@ type routeRequest struct {
 	Description    string `json:"description"`
 	SupportsPickup *bool  `json:"supports_pickup"`
 	SupportsDrop   *bool  `json:"supports_drop"`
+	SupportsOuting *bool  `json:"supports_outing"`
 }
 
 func (req *routeRequest) toInput() (store.RouteInput, validate.Errors) {
@@ -43,9 +44,11 @@ func (req *routeRequest) toInput() (store.RouteInput, validate.Errors) {
 		Code:        strings.ToUpper(strings.TrimSpace(req.Code)),
 		StartPoint:  strings.TrimSpace(req.StartPoint),
 		Description: req.Description,
-		// Both trip types unless told otherwise.
+		// Morning Pickup and Evening Drop default on unless told otherwise;
+		// Special Trip/Outing defaults off (it's the less common, opt-in case).
 		SupportsPickup: req.SupportsPickup == nil || *req.SupportsPickup,
 		SupportsDrop:   req.SupportsDrop == nil || *req.SupportsDrop,
+		SupportsOuting: req.SupportsOuting != nil && *req.SupportsOuting,
 	}
 	v := validate.New()
 	v.Required("name", in.Name)
@@ -53,7 +56,8 @@ func (req *routeRequest) toInput() (store.RouteInput, validate.Errors) {
 	v.Check(routeCodeRe.MatchString(in.Code), "code", "must be 1-20 letters, digits or hyphens, e.g. RS-01")
 	v.MaxLen("start_point", in.StartPoint, 200)
 	v.MaxLen("description", in.Description, 1000)
-	v.Check(in.SupportsPickup || in.SupportsDrop, "supports_pickup", "a route must support Morning Pickup, Evening Drop, or both")
+	v.Check(in.SupportsPickup || in.SupportsDrop || in.SupportsOuting, "supports_pickup",
+		"a route must support Morning Pickup, Evening Drop or Special Trip/Outing")
 	return in, v.Errors()
 }
 
@@ -405,6 +409,59 @@ func (a *API) ReorderStops(w http.ResponseWriter, r *http.Request) {
 	})
 	if errors.Is(err, store.ErrStopOrderMismatch) {
 		httpx.ValidationError(w, validate.Errors{"stop_ids": "must list every stop of this route exactly once"})
+		return
+	}
+	if err != nil {
+		storeError(w, r, err, nil)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, stops)
+}
+
+// ReorderDropSequence takes every stop ID of the route with a drop_time set, in
+// the new Evening Drop travel order — independent of the Morning Pickup order
+// set by ReorderStops.
+func (a *API) ReorderDropSequence(w http.ResponseWriter, r *http.Request) {
+	schoolID := chi.URLParam(r, "schoolID")
+	routeID, ok := idParam(w, r, "routeID")
+	if !ok {
+		return
+	}
+	var req struct {
+		DropStopIDs []string `json:"drop_stop_ids"`
+	}
+	if !httpx.Decode(w, r, &req) {
+		return
+	}
+	for _, id := range req.DropStopIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			httpx.ValidationError(w, validate.Errors{"drop_stop_ids": "must be stop IDs"})
+			return
+		}
+	}
+	ctx := r.Context()
+	var stops []models.Stop
+	err := a.Store.InTx(ctx, func(q store.DBTX) error {
+		if err := store.LockRoute(ctx, q, schoolID, routeID); err != nil {
+			return err
+		}
+		before, err := store.ListStops(ctx, q, routeID)
+		if err != nil {
+			return err
+		}
+		if err := store.ReorderDropSequence(ctx, q, routeID, req.DropStopIDs); err != nil {
+			return err
+		}
+		if stops, err = store.ListStops(ctx, q, routeID); err != nil {
+			return err
+		}
+		return a.audit(ctx, q, r, store.AuditEntry{
+			SchoolID: &schoolID, Action: "route.drop_stops_reorder", EntityType: "route", EntityID: &routeID,
+			Before: stopIDs(before), After: stopIDs(stops),
+		})
+	})
+	if errors.Is(err, store.ErrDropOrderMismatch) {
+		httpx.ValidationError(w, validate.Errors{"drop_stop_ids": "must list every Evening Drop stop of this route exactly once"})
 		return
 	}
 	if err != nil {

@@ -1,7 +1,7 @@
 import { api, getData, send } from './api'
 
 export interface MapsSettings {
-  /** Loads Google Maps in the admin web. Empty = OpenStreetMap is used. */
+  /** Loads Google Maps in the admin web. Empty = maps/place search are unavailable (MapsConfigError). */
   browser_key: string
   /** The server key itself is never returned. */
   server_key_set: boolean

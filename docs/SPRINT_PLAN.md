@@ -75,7 +75,7 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 | ✅ S2-08 | FE | Drivers pages (list / form / status change) | CRUD from UI |
 | ✅ S2-09 | FE | Buses pages | CRUD from UI |
 | ✅ S2-10 | FE | Routes pages | CRUD from UI |
-| ✅ S2-11 | FE | Stop management (Leaflet + OpenStreetMap): map picker to set lat/lng, drag-to-reorder list, geofence circle on map | Stops visible in order on map |
+| ✅ S2-11 | FE | Stop management (Google Maps): map picker to set lat/lng, drag-to-reorder list, geofence circle on map | Stops visible in order on map |
 | ✅ S2-12 | BE+FE | Permissions: Transport Manager has full access here, Driver/Parent get none via web | RBAC tests pass |
 | ◐ S2-13 | OPS | Shared dev API environment reachable by the mobile team (HTTPS URL, seeded demo school, test driver + parent accounts). Deployment files ready and tested locally (`deploy/`: Docker Compose, Nginx HTTPS/WSS, backups; see `deploy/README.md`). Waiting for: server, DNS name | Mobile team calls `/health` from a device |
 
@@ -119,7 +119,7 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 | S4-09 | MOB | Driver OTP login | Logs in with real OTP / stub |
 | S4-10 | MOB | Today's trips screen → trip detail (route, ordered stops, bus) → Confirm / Start / End | Status updates in admin web |
 | S4-11 | API | **Handoff 3, Driver trips:** today's trips, trip detail, confirm/start/end, status values and allowed transitions | Mobile team completes a trip on dev |
-| ✅ S4-12 | BE+FE | Per-school Google Maps keys in Settings: browser key (admin maps, falls back to OpenStreetMap) and server key (ETA, encrypted at rest, never returned) | Each school uses its own key |
+| ✅ S4-12 | BE+FE | Per-school Google Maps keys in Settings: browser key (admin maps) and server key (ETA, encrypted at rest, never returned); Google Maps is the only map provider — a school with no browser key gets a clear configuration message, never a fallback map | Each school uses its own key |
 
 ---
 
@@ -214,6 +214,15 @@ Every backend task must follow the CLAUDE.md non-negotiables: school-scoped quer
 | S9-06 | OPS | Staging + production deploy, backups, monitoring/alerting, logs | Deployed |
 | S9-07 | ALL | UAT with one pilot school: full flow Route → … → Trip end | Sign-off |
 | S9-08 | — | User docs: admin guide, driver guide, parent FAQ | Shared |
+
+---
+
+## Change requests
+
+| ID | Tag | Task | Done when |
+|---|---|---|---|
+| ◐ CR-01 | BE+FE+API | Driver self-assignment (owner decision 2026-10-11): drivers take an available route + free bus for a date and trip type, no approval; School Admins and Transport Managers notified; staff assignment stays as override. Backend + admin web done, not merged: `GET /driver/route-slots`, `POST /driver/route-slots/claim`, `POST /driver/trips/{id}/release` (mobile handoff 8, API 0.11.0), staff inbox + header bell, "Claimed / Needs driver" on the dashboard. No migration. Waiting for: mobile team Driver app screens; confirm the policy defaults in CLAUDE.md | A driver takes a route in the Driver app and the school sees it |
+| MOB | MOB | Driver app: choose trip type + date → route list (available / taken / mine) → route details with stops → bus → "Take this route" → confirmed trip; handle 409 by reloading; "Give back" before start | Driver can take and release a route |
 
 ---
 

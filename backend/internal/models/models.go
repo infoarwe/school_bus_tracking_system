@@ -123,6 +123,7 @@ type Route struct {
 	Description    string    `json:"description"`
 	SupportsPickup bool      `json:"supports_pickup"`
 	SupportsDrop   bool      `json:"supports_drop"`
+	SupportsOuting bool      `json:"supports_outing"` // eligible as a Special Trip/Outing's template route
 	Status         string    `json:"status"`
 	StopCount      int       `json:"stop_count"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -137,9 +138,10 @@ type Stop struct {
 	Landmark        string    `json:"landmark"`
 	Latitude        float64   `json:"latitude"`
 	Longitude       float64   `json:"longitude"`
-	Sequence        int       `json:"sequence"`
-	PickupTime      *string   `json:"pickup_time"` // HH:MM
-	DropTime        *string   `json:"drop_time"`   // HH:MM
+	Sequence        int       `json:"sequence"`         // Morning Pickup travel order, 1..N
+	DropSequence    *int      `json:"drop_sequence"`    // Evening Drop travel order, independent of Sequence; null if not part of the evening leg
+	PickupTime      *string   `json:"pickup_time"`      // HH:MM
+	DropTime        *string   `json:"drop_time"`        // HH:MM
 	GeofenceRadiusM int       `json:"geofence_radius_m"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
@@ -227,6 +229,7 @@ type Parent struct {
 const (
 	TripMorningPickup = "morning_pickup"
 	TripEveningDrop   = "evening_drop"
+	TripSpecial       = "special_trip" // Special Trip/Outing: admin-created, may have no permanent route
 
 	TripScheduled = "scheduled"
 	TripConfirmed = "confirmed"
@@ -235,20 +238,25 @@ const (
 	TripCancelled = "cancelled"
 )
 
-// Trip is one daily assignment: Driver + Bus + Route + Date + Trip Type.
+// TripRoute is the route a trip runs on. A Special Trip/Outing may have none
+// (an ad-hoc trip with its own waypoints instead), in which case Trip.Route is nil.
+type TripRoute struct {
+	ID        string `json:"id"`
+	Code      string `json:"code"`
+	Name      string `json:"name"`
+	StopCount int    `json:"stop_count"`
+}
+
+// Trip is one daily assignment: Driver + Bus + Route (or ad-hoc waypoints) + Date + Trip Type.
 type Trip struct {
 	ID       string `json:"id"`
 	SchoolID string `json:"school_id"`
 	TripDate string `json:"trip_date"` // YYYY-MM-DD in the school's time zone
-	TripType string `json:"trip_type"` // morning_pickup | evening_drop
+	TripType string `json:"trip_type"` // morning_pickup | evening_drop | special_trip
 	Status   string `json:"status"`
-	Route    struct {
-		ID        string `json:"id"`
-		Code      string `json:"code"`
-		Name      string `json:"name"`
-		StopCount int    `json:"stop_count"`
-	} `json:"route"`
-	Bus struct {
+	// Route is null for a routeless Special Trip/Outing; Title is shown instead.
+	Route *TripRoute `json:"route"`
+	Bus   struct {
 		ID            string `json:"id"`
 		VehicleNumber string `json:"vehicle_number"`
 		Capacity      int    `json:"capacity"`
@@ -258,17 +266,29 @@ type Trip struct {
 		Name   string `json:"name"`
 		Mobile string `json:"mobile"`
 	} `json:"driver"`
-	// Students assigned to the route with a stop for this trip type.
-	StudentCount int        `json:"student_count"`
-	Notes        string     `json:"notes"`
-	CancelReason string     `json:"cancel_reason"`
-	ConfirmedAt  *time.Time `json:"confirmed_at"`
-	StartedAt    *time.Time `json:"started_at"`
-	EndedAt      *time.Time `json:"ended_at"`
-	CancelledAt  *time.Time `json:"cancelled_at"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// Students assigned to the route with a stop for this trip type (0 for a special_trip).
+	StudentCount int    `json:"student_count"`
+	Title        string `json:"title"` // Special Trip/Outing name; "" for route-based trips
+	// NotifyParents: whether a Special Trip/Outing should notify its template
+	// route's usual parents. Ignored (always notifies) for the other trip types.
+	NotifyParents bool       `json:"notify_parents"`
+	Notes         string     `json:"notes"`
+	CancelReason  string     `json:"cancel_reason"`
+	ConfirmedAt   *time.Time `json:"confirmed_at"`
+	StartedAt     *time.Time `json:"started_at"`
+	EndedAt       *time.Time `json:"ended_at"`
+	CancelledAt   *time.Time `json:"cancelled_at"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	// AssignedBy: "driver" when the trip's driver took the route in the Driver app
+	// (self-assignment), "staff" when school staff assigned it.
+	AssignedBy string `json:"assigned_by"`
 }
+
+const (
+	AssignedByDriver = "driver"
+	AssignedByStaff  = "staff"
+)
 
 type TripStatusChange struct {
 	FromStatus    *string   `json:"from_status"`

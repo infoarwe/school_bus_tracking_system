@@ -104,11 +104,12 @@ server {
         include /etc/nginx/snippets/security-headers.conf;
         add_header Cache-Control "no-cache" always;
         # Admin tokens are in localStorage, so limit what injected markup could do. Enforced:
-        # directives that cannot break the app. Report-only: the full policy (Google Maps,
-        # OpenStreetMap tiles, WebSocket). Check the browser console for violations with a
-        # school that uses Google Maps, then move it into the enforced header.
+        # directives that cannot break the app. Report-only: the full policy (Google Maps is
+        # the only map/geocoding provider; WebSocket for live tracking). Check the browser
+        # console for violations with a school that has a Google Maps key configured, then
+        # move it into the enforced header.
         add_header Content-Security-Policy "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
-        add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' https://maps.googleapis.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://*.googleapis.com https://*.gstatic.com https://*.google.com https://*.ggpht.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' wss://${SERVER_NAME} https://*.googleapis.com https://*.google.com https://*.gstatic.com; worker-src blob:; frame-src https://*.google.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
+        add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' https://maps.googleapis.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com https://*.google.com https://*.ggpht.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' wss://${SERVER_NAME} https://*.googleapis.com https://*.google.com https://*.gstatic.com; worker-src blob:; frame-src https://*.google.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
         try_files $uri /index.html;
     }
 }

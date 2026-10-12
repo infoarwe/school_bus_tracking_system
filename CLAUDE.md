@@ -31,7 +31,8 @@ Chosen:
 - Admin web: React 19 + TypeScript + Vite, Ant Design, React Router, axios, in `frontend/`
 - Push provider: FCM HTTP v1. **Each school has its own branded apps (own name, logo) and its own Firebase project**: the School/Super Admin uploads the school's service-account JSON in Settings → Push notifications (`PUT /schools/{id}/settings/push`); it is validated, stored AES-GCM encrypted (`schools.fcm_credentials_enc`), never returned or audit-logged. `notify.SchoolSenders` sends each push through its school's project (cached per key version). Optional server-wide fallback key file for schools without one: `backend/secrets/firebase-service-account.json` (git-ignored) or `FCM_CREDENTIALS_FILE`; a broken fallback file stops the API at start-up; one Firebase project for all schools (shared apps). Without it pushes are only logged (`notify.LogSender`).
 - Android apps: Kotlin, built by the mobile team (not in this repo)
-- Maps & GPS: Google Maps, with **a different key per school** (Settings → Maps, `PUT /schools/{id}/settings/maps`). The browser key draws admin maps (`GoogleRouteMap`); a school without one falls back to Leaflet + OpenStreetMap (`LeafletRouteMap`); `RouteMap` picks. The server key is for ETA routing (Sprint 6): stored AES-GCM encrypted with `DATA_ENCRYPTION_KEY` (`internal/secrets`), never returned by the API or written to the audit log.
+- Maps & GPS: Google Maps is the **only** map/geocoding provider, with **a different key per school** (Settings → Maps, `PUT /schools/{id}/settings/maps`). The browser key draws admin maps (`GoogleRouteMap`/`GoogleLiveMap` via `RouteMap`/`LiveMap` → `MapProvider`); a school without one sees a clear configuration message (`MapsConfigError`), never a fallback to another map service. **No environment variables**: keys live per school in the database (not a shared `VITE_GOOGLE_MAPS_API_KEY` — each school brings its own Google Cloud project/key, restricted to its own domain).
+- Place search (`components/LocationSearch.tsx`, used by the stop form and the Special Trip/Outing waypoint editor): Google **Places Autocomplete (New)** only, with the school's browser key, suggestions as you type (session tokens; the key needs "Maps JavaScript API" **and** "Places API (New)" enabled, HTTP-referrer restricted to the admin web's domain). Without a key: `MapsConfigError` — a clear "Google Maps is not configured for this school" message, not a fallback to another geocoding service. The CSP's connect-src allows only `https://*.googleapis.com` and related Google domains (`deploy/nginx/templates/sbts.conf.template`). The server key is for ETA routing (Sprint 6): stored AES-GCM encrypted with `DATA_ENCRYPTION_KEY` (`internal/secrets`), never returned by the API or written to the audit log.
 - Deployment: Docker on Linux behind Nginx; monitoring with Prometheus + Grafana. Files in `deploy/` (Compose, Nginx HTTPS/WSS, backup script, `deploy/README.md`); monitoring not set up yet.
 - File storage (school logos): `internal/storage` `Store` interface; only local disk today (`STORAGE_DRIVER=local`, `UPLOAD_DIR`, a Docker volume in deployment, backed up by `deploy/scripts/backup.sh`). S3/MinIO = a new `Store` implementation, no handler changes.
 
@@ -77,7 +78,7 @@ npm run lint && npm run format:check && npm run build
 | Super Admin | Web | Global. Manages schools/tenants, school admins, global settings, subscriptions, audit logs. Mandatory 2FA recommended. |
 | School Admin | Web | One school. Students, parents, routes, stops, buses, drivers, assignments, announcements, reports. |
 | Transport Manager | Web | One school, transport only. Drivers, buses, routes, daily assignments, live monitoring, trip override, delays, emergencies, route notifications. No high-level school config; student data limited to transport needs. |
-| Driver | Android | Own assigned trips only. Login, confirm/start/end trip, share GPS, report delay/breakdown/emergency. |
+| Driver | Android | Own assigned trips only. Login, take an available route + bus for a date (self-assignment), confirm/start/end trip, share GPS, report delay/breakdown/emergency. |
 | Parent | Android | Linked children only. Track bus, ETA, status, notifications, switch child. Cannot change any assignment. |
 | Student | (record) | Data record linked to parent, route, stop. No login in V1. |
 
@@ -121,7 +122,7 @@ These come straight from the documents. Code that breaks one is a bug.
 4. **Morning Pickup and Evening Drop are separate trip types**, with their own assignments and clearly distinguished in the parent app.
 5. **Routes have ordered stops.** A student belongs to exactly one route and a specific stop (pickup and drop stop as applicable). When assigning, only stops of the selected route are offered. Parents never pick routes.
 6. **Parents see only linked children**, and live location only for the relevant child's trip/route. Never expose other students' personal data.
-7. **Drivers see only their assigned/current trips.** They cannot pick students or edit routes or student assignments. GPS is shared only while a trip is active.
+7. **Drivers see only their assigned/current trips.** They cannot pick students or edit routes or student assignments. GPS is shared only while a trip is active. When choosing a route (self-assignment) they see each route's stops, times, student **count** and whether it is available, taken or theirs, never who took it.
 8. **Stop status is GPS + geofence driven.** Upcoming / Approaching / Reached / Crossed are computed automatically, not set by hand.
 9. **ETA is from the current bus position to the child's assigned stop.**
 10. **Audit log** all important create/update/delete/assignment actions. Super Admin critical actions require confirmation and are recorded.
@@ -149,7 +150,7 @@ Example assignment: 07-Oct-2026, Driver Kumar + Bus TN-38-AB-1234 + Route RS-01 
 1. Admin creates routes and adds ordered stops.
 2. Admin registers students, assigns route then stop.
 3. Admin registers drivers and buses.
-4. Admin/Transport Manager creates the daily assignment (driver + bus + route + trip).
+4. The driver takes an available route and a free bus for the date and trip type in the Driver app (self-assignment, no approval; School Admins and Transport Managers are notified). Admin/Transport Manager can still create or change the daily assignment (driver + bus + route + trip) as an override. *Owner decision, 2026-10-11: changes the source documents' flow, where staff create every assignment.*
 5. Driver app: login → see today's trip → confirm → start trip.
 6. Driver GPS → Go backend → Redis current location → WebSocket → Parent app + Admin web.
 7. GPS + geofence → ETA and Upcoming / Approaching / Reached / Crossed per stop.
@@ -289,6 +290,7 @@ Advanced analytics, attendance automation and additional integrations. Do not bu
 - Background jobs (`internal/jobs`, run by every API instance): stale sweep every 30 s (`bus_stale` once per outage, per-school `stale_after_seconds`), GPS history retention hourly.
 - Tests use miniredis (no Redis server needed); WebSocket tests run against `httptest.NewServer`.
 - Branding (S8-09, `handlers/branding.go`): app name, colours and logo per school on `schools.brand_*`. Staff read `/schools/{id}/settings/branding`; Super/School Admin change it (audited). Apps call caller-scoped `GET /branding`. Logos: multipart field `logo`, type checked from content (PNG/JPEG/WebP), 16–4096 px, re-encoded (strips metadata; WebP → PNG), stored under a random name; served without a token at `/api/v1/branding/logos/{file}` only while it is some school's current logo. Upload writes the file first and deletes it if the transaction fails; the old file is deleted after commit.
+- Driver self-assignment (`handlers/route_slots.go`, `store/route_slots.go`): `GET /driver/route-slots?date&trip_type` (eligible routes with availability, stops, free buses), `POST /driver/route-slots/claim`, `POST /driver/trips/{id}/release`. A claim is an ordinary `trips` row created by the driver and confirmed at once, so tracking, stop detection, parent notifications, alerts and reports need nothing special; `trips.assigned_by` (computed: `created_by` = the driver's user) tells `driver` from `staff`. No migration: the partial unique slot indexes are the concurrency guard (simultaneous claims → one insert wins, the rest `409 route_taken` / `bus_taken` / `already_assigned`). Same request again → `200` with the same trip. Policy: any active driver, any active route of the school with stops that runs the trip type, today … +6 days (school time zone); bus = active and free in the slot; a driver releases only their **own claim** before starting (staff-assigned trips: `409 assigned_by_school`). Claims and releases are audited (`trip.claim`, `trip.release`) and notify School Admins + Transport Managers in the same transaction (`notify.Notify`, dedupe `trip:<id>:claimed|released`, recipients `store.SchoolStaff`; no push, staff have no devices), then go out live as the `staff_notification` WebSocket event (staff only). Parents are not told about claims or releases. Staff inbox: `GET /staff/notifications` + `POST /staff/notifications/read`; the admin web shows it in the header bell (`AlertsContext`).
 - Drivers get per-stop student **counts** only, never student names (rule 7 / privacy). Parents get bus number and driver name, never the driver's mobile.
 
 ### Backend
@@ -303,7 +305,11 @@ Advanced analytics, attendance automation and additional integrations. Do not bu
 ### Frontend
 
 - TypeScript strict; ESLint + Prettier (no semicolons, single quotes, 100 cols).
-- All HTTP goes through `src/services/api.ts`; errors arrive as `ApiError` (`status`, `code`, `fields`).
+- All HTTP goes through `src/services/api.ts`; errors arrive as `ApiError` (`status`, `code`, `fields`, `requestId`). Network failures, timeouts, proxy errors and 5xx get safe messages there (5xx include the request ID as a reference; server text is never shown). Show errors with `errorMessage(e)`; on forms use `applyApiErrors(form, e, rename?)`, which puts field errors on the fields and returns the rest.
+- List pages: `useServerList` + `<ListEmpty list={list} empty="…" />` as the table's `emptyText` (load error with Try again / no matches / first-use hint).
+- Theme tokens are in `main.tsx` (primary `#1d4ed8` for contrast; school-bus amber only on maps). Sidebar groups come from `group` in `routes/menu.tsx`. Pages keep the `PageHeader` + breadcrumb (from the menu) pattern; mobile gets a drawer menu.
+- Forms that create linked records in several calls (`StudentRegisterForm`) keep what was saved and retry only the remaining steps; never re-create on retry. Look up parents by mobile (`utils/mobile.ts`) before creating one: a mobile number is one login.
+- Route setup: "Add route" opens `/routes/{id}?setup=1` (Details → Stops → Review); the review (`routeIssues`) flags missing/out-of-order times and stops < 50 m apart. `?new=1` on Routes/Students opens the create form (dashboard quick actions).
 - One file per page in `src/pages`, registered in `src/routes`. Ant Design components; avoid custom CSS unless needed.
 
 ## School Bus Tracking Software – Tech Stack

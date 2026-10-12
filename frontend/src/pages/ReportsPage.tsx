@@ -204,7 +204,7 @@ function Reports({ schoolId }: { schoolId: string }) {
                   notFoundContent="No trips with GPS on this day"
                   options={masters.trips.map((t) => ({
                     value: t.id,
-                    label: `${t.route.code} · ${tripTypeLabels[t.trip_type]} · ${t.bus.vehicle_number}`,
+                    label: `${t.route?.code ?? t.title} · ${tripTypeLabels[t.trip_type]} · ${t.bus.vehicle_number}`,
                   }))}
                 />
               </>

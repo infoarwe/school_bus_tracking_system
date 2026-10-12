@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { App, Button, Flex, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StatusTag from '../components/StatusTag'
@@ -81,6 +82,7 @@ function UsersTable({ schoolId, schoolName }: { schoolId: string; schoolName: st
       <Table<User>
         rowKey="id"
         loading={list.loading}
+        locale={{ emptyText: <ListEmpty list={list} empty="No school users yet." /> }}
         dataSource={list.rows}
         scroll={{ x: 900 }}
         pagination={list.pagination}

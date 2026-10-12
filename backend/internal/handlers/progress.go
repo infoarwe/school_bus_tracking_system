@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,25 +22,54 @@ type ETAProvider interface {
 	ETAs(ctx context.Context, apiKey string, from tracking.Point, pending []tracking.StopProgress, now time.Time) (*tracking.GoogleETA, error)
 }
 
-// tripStopsInOrder returns the stops in the order the bus visits them:
-// Morning Pickup runs stop 1 → N and then to the school; Evening Drop leaves
-// the school and runs N → 1 (the reverse of the pickup order).
-func tripStopsInOrder(t *models.Trip, stops []models.Stop, s *store.TrackingSettings) []tracking.StopInput {
-	morning := t.TripType == models.TripMorningPickup
-	out := make([]tracking.StopInput, 0, len(stops)+1)
-	for _, st := range stops {
-		sched := st.DropTime
-		if morning {
-			sched = st.PickupTime
-		}
-		out = append(out, tracking.StopInput{ID: st.ID, Sequence: st.Sequence, Name: st.Name,
-			Latitude: st.Latitude, Longitude: st.Longitude, RadiusM: float64(st.GeofenceRadiusM), ScheduledTime: sched})
-	}
-	if !morning {
-		slices.Reverse(out)
-	} else if s.SchoolLatitude != nil && s.SchoolLongitude != nil {
+// appendSchoolStop appends the synthesized "School" stop used as the final
+// destination of Morning Pickup and of a Special Trip/Outing (both end back at
+// the school; Evening Drop does not get one — leaving school is not
+// geofence-tracked, only arriving at each stop is).
+func appendSchoolStop(out []tracking.StopInput, s *store.TrackingSettings) []tracking.StopInput {
+	if s.SchoolLatitude != nil && s.SchoolLongitude != nil {
 		out = append(out, tracking.StopInput{ID: tracking.SchoolStopID, Name: "School",
 			Latitude: *s.SchoolLatitude, Longitude: *s.SchoolLongitude, RadiusM: tracking.SchoolRadiusM})
+	}
+	return out
+}
+
+// tripStopsInOrder returns the stops (or, for a routeless special_trip, the
+// waypoints) in the order the bus visits them:
+//   - Morning Pickup runs stop 1 → N, in Sequence order, then to the school.
+//   - Evening Drop leaves the school and runs in DropSequence order — its own,
+//     independently configured order, not necessarily the reverse of Sequence.
+//   - Special Trip/Outing runs its waypoints in order, then back to the school
+//     (always School → waypoints → School).
+func tripStopsInOrder(t *models.Trip, stops []models.Stop, s *store.TrackingSettings) []tracking.StopInput {
+	out := make([]tracking.StopInput, 0, len(stops)+1)
+	switch t.TripType {
+	case models.TripEveningDrop:
+		sorted := make([]models.Stop, len(stops))
+		copy(sorted, stops)
+		sort.Slice(sorted, func(i, j int) bool {
+			si, sj := 0, 0
+			if sorted[i].DropSequence != nil {
+				si = *sorted[i].DropSequence
+			}
+			if sorted[j].DropSequence != nil {
+				sj = *sorted[j].DropSequence
+			}
+			return si < sj
+		})
+		for _, st := range sorted {
+			if st.DropSequence == nil {
+				continue // not part of the evening leg
+			}
+			out = append(out, tracking.StopInput{ID: st.ID, Sequence: *st.DropSequence, Name: st.Name,
+				Latitude: st.Latitude, Longitude: st.Longitude, RadiusM: float64(st.GeofenceRadiusM), ScheduledTime: st.DropTime})
+		}
+	default: // morning_pickup and special_trip (stops here are waypoints-as-stops for special_trip)
+		for _, st := range stops {
+			out = append(out, tracking.StopInput{ID: st.ID, Sequence: st.Sequence, Name: st.Name,
+				Latitude: st.Latitude, Longitude: st.Longitude, RadiusM: float64(st.GeofenceRadiusM), ScheduledTime: st.PickupTime})
+		}
+		out = appendSchoolStop(out, s)
 	}
 	return out
 }
@@ -53,11 +83,15 @@ func (a *API) processProgress(ctx context.Context, r *http.Request, t *models.Tr
 		return err
 	}
 	if p == nil {
-		stops, err := store.ListStops(ctx, a.Store.Pool, t.Route.ID)
+		stops, err := a.tripStops(ctx, t) // routes' stops, or a special_trip's waypoints
 		if err != nil {
 			return err
 		}
-		p = tracking.NewProgress(t.ID, t.TripType, tripStopsInOrder(t, stops, settings))
+		plain := make([]models.Stop, len(stops))
+		for i, s := range stops {
+			plain[i] = s.Stop
+		}
+		p = tracking.NewProgress(t.ID, t.TripType, tripStopsInOrder(t, plain, settings))
 	}
 
 	cfg := tracking.DefaultGeofence(float64(settings.ApproachDistanceM))
@@ -349,6 +383,9 @@ func pickChildTrip(trips []models.Trip, as *models.StudentAssignment) (*models.T
 	var best *models.Trip
 	for i := range trips {
 		t := &trips[i]
+		if t.TripType == models.TripSpecial {
+			continue // outings have no assigned pickup/drop stop for this child
+		}
 		if stopFor(t) == nil {
 			continue // the child does not ride this trip type
 		}

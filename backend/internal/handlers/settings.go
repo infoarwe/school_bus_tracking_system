@@ -16,7 +16,8 @@ import (
 var googleKeyRe = regexp.MustCompile(`^AIza[0-9A-Za-z_-]{35}$`)
 
 type mapsSettingsResponse struct {
-	// Used by the admin web to load Google Maps. Empty = the web falls back to OpenStreetMap.
+	// Used by the admin web to load Google Maps. Empty = maps/place search are unavailable
+	// for this school (the admin web shows a configuration message, not a fallback map).
 	BrowserKey string `json:"browser_key"`
 	// The server key is never returned; only whether one is set and its last 4 characters.
 	ServerKeySet  bool   `json:"server_key_set"`

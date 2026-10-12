@@ -144,6 +144,8 @@ export interface RouteInput {
   description: string
   supports_pickup: boolean
   supports_drop: boolean
+  /** Eligible as a Special Trip/Outing's template route. */
+  supports_outing: boolean
 }
 
 export interface BusRoute extends RouteInput {
@@ -170,7 +172,10 @@ export interface StopInput {
 export interface Stop extends StopInput {
   id: string
   route_id: string
+  /** Morning Pickup travel order, 1..N. */
   sequence: number
+  /** Evening Drop travel order, independent of sequence; null if not part of the evening leg. */
+  drop_sequence: number | null
   created_at: string
   updated_at: string
 }
@@ -279,21 +284,43 @@ export interface ImportResult {
   errors: { row: number; field: string; message: string }[]
 }
 
-export type TripType = 'morning_pickup' | 'evening_drop'
+export type TripType = 'morning_pickup' | 'evening_drop' | 'special_trip'
 export type TripStatus = 'scheduled' | 'confirmed' | 'started' | 'completed' | 'cancelled'
 
 export const tripTypeLabels: Record<TripType, string> = {
   morning_pickup: 'Morning Pickup',
   evening_drop: 'Evening Drop',
+  special_trip: 'Special Trip / Outing',
+}
+
+export interface WaypointInput {
+  name: string
+  landmark: string
+  latitude: number
+  longitude: number
+  geofence_radius_m: number
+}
+
+export interface Waypoint extends WaypointInput {
+  id: string
+  sequence: number
+  arrived_at: string | null
 }
 
 export interface TripInput {
   trip_date: string
   trip_type: TripType
-  route_id: string
+  /** Required for morning_pickup/evening_drop; optional template for special_trip. */
+  route_id?: string
   bus_id: string
   driver_id: string
   notes?: string
+  /** special_trip only, required when route_id is omitted: the outing's name. */
+  title?: string
+  /** special_trip only; ignored (always notifies) for the other two types. Default true. */
+  notify_parents?: boolean
+  /** special_trip without route_id only: the ad-hoc destinations, in order. */
+  waypoints?: WaypointInput[]
 }
 
 export interface Trip {
@@ -302,10 +329,14 @@ export interface Trip {
   trip_date: string
   trip_type: TripType
   status: TripStatus
-  route: { id: string; code: string; name: string; stop_count: number }
+  /** Null for a routeless Special Trip/Outing; title is shown instead. */
+  route: { id: string; code: string; name: string; stop_count: number } | null
   bus: { id: string; vehicle_number: string; capacity: number }
   driver: { id: string; name: string; mobile: string }
   student_count: number
+  /** Special Trip/Outing name; "" for route-based trips. */
+  title: string
+  notify_parents: boolean
   notes: string
   cancel_reason: string
   confirmed_at: string | null
@@ -314,6 +345,8 @@ export interface Trip {
   cancelled_at: string | null
   created_at: string
   updated_at: string
+  /** driver: the driver took this route in the Driver app; staff: school staff assigned it. */
+  assigned_by: 'driver' | 'staff'
 }
 
 export interface TripStatusChange {
@@ -456,7 +489,10 @@ export interface Alert {
   id: string
   trip_id: string
   trip_type: TripType
+  /** "" for a routeless Special Trip/Outing: see title. */
   route_code: string
+  /** The outing's name; "" for route-based trips. */
+  title: string
   bus_number: string
   driver_name: string
   created_at: string
@@ -500,6 +536,17 @@ export interface DashboardData {
     delays: number
     missed_stops: number
   }[]
+  /** Today's Special Trips/Outings, separate from the route-based list above. */
+  outings: {
+    trip_id: string
+    title: string
+    status: TripStatus
+    bus_number: string
+    driver_name: string
+    trip_date: string
+    /** "" when the outing has no template route. */
+    route_code: string
+  }[]
 }
 
 export type ReportFilterName = 'from' | 'to' | 'route_id' | 'bus_id' | 'driver_id' | 'trip_id'
@@ -534,4 +581,24 @@ export interface TrackPoint {
   longitude: number
   speed_mps: number | null
   recorded_at: string
+}
+
+/** A staff inbox item: a driver took or released a route (GET /staff/notifications). */
+export interface StaffNotice {
+  id: string
+  type: 'route_claimed' | 'route_released' | string
+  title: string
+  body: string
+  data: {
+    trip_id?: string
+    route_id?: string
+    route_code?: string
+    driver_name?: string
+    bus_number?: string
+    trip_date?: string
+    trip_type?: TripType
+    at?: string
+  }
+  read_at: string | null
+  created_at: string
 }

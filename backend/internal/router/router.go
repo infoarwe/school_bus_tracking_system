@@ -127,6 +127,10 @@ func New(d Deps) http.Handler {
 					r.Get("/trips/{tripID}/progress", a.DriverTripProgress)
 					r.Post("/trips/{tripID}/delays", a.DriverReportDelay)
 					r.Post("/trips/{tripID}/emergency", a.DriverReportEmergency)
+					// Self-assignment: browse routes for a date + trip type, take one, give it back.
+					r.Get("/route-slots", a.DriverRouteSlots)
+					r.Post("/route-slots/claim", a.DriverClaimRoute)
+					r.Post("/trips/{tripID}/release", a.DriverReleaseTrip)
 				})
 				r.Route("/parent", func(r chi.Router) {
 					r.Use(middleware.RequireRoles(models.RoleParent))
@@ -137,6 +141,10 @@ func New(d Deps) http.Handler {
 					r.Get("/notifications", a.ParentNotifications)
 					r.Post("/notifications/read", a.MarkNotificationsRead)
 				})
+
+				// Staff inbox (route claims/releases): the caller's own items only.
+				r.With(webRoles).Get("/staff/notifications", a.StaffNotifications)
+				r.With(webRoles).Post("/staff/notifications/read", a.MarkNotificationsRead)
 
 				r.With(superAdmin).Get("/audit-logs", a.PlatformAuditLogs)
 				r.With(superAdmin).Get("/schools", a.ListSchools)
@@ -196,6 +204,7 @@ func New(d Deps) http.Handler {
 						r.Patch("/routes/{routeID}/status", a.SetRouteStatus)
 						r.Post("/routes/{routeID}/stops", a.CreateStop)
 						r.Put("/routes/{routeID}/stops/order", a.ReorderStops)
+					r.Put("/routes/{routeID}/stops/drop-order", a.ReorderDropSequence)
 						r.Put("/routes/{routeID}/stops/{stopID}", a.UpdateStop)
 						r.Delete("/routes/{routeID}/stops/{stopID}", a.DeleteStop)
 						r.Get("/routes/{routeID}/students", a.RouteStudents)

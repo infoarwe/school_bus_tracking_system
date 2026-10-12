@@ -58,7 +58,7 @@ export default function AlertList({ schoolId, compact }: { schoolId: string; com
                 </Tag>
               )}
               <Typography.Text strong>
-                {a.route_code} · {a.bus_number}
+                {a.route_code || a.title} · {a.bus_number}
               </Typography.Text>
             </Space>
             <Typography.Text>

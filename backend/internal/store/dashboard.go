@@ -20,9 +20,21 @@ type Dashboard struct {
 		OnRoad  int `json:"on_road"` // trips in progress with GPS
 		Offline int `json:"offline"` // ...of which stale
 	} `json:"live"`
-	DelayedTrips    int            `json:"delayed_trips"` // trips with a delay reported today
-	OpenEmergencies int            `json:"open_emergencies"`
-	Routes          []RouteSummary `json:"routes"`
+	DelayedTrips    int             `json:"delayed_trips"` // trips with a delay reported today
+	OpenEmergencies int             `json:"open_emergencies"`
+	Routes          []RouteSummary  `json:"routes"`
+	Outings         []OutingSummary `json:"outings"` // today's Special Trips, distinct from the route list above
+}
+
+// OutingSummary is one Special Trip/Outing's day at a glance (requirement: distinguishable from ordinary trips).
+type OutingSummary struct {
+	TripID        string `json:"trip_id"`
+	Title         string `json:"title"`
+	Status        string `json:"status"`
+	BusNumber     string `json:"bus_number"`
+	DriverName    string `json:"driver_name"`
+	TripDate      string `json:"trip_date"`
+	RouteCode     string `json:"route_code"` // "" when the outing has no template route
 }
 
 // RouteSummary is one active route's day at a glance.
@@ -41,7 +53,7 @@ type RouteSummary struct {
 
 // GetDashboard computes the overview. Live counts come from Redis (caller).
 func GetDashboard(ctx context.Context, q DBTX, schoolID string) (*Dashboard, error) {
-	d := &Dashboard{Trips: map[string]map[string]int{}, Routes: []RouteSummary{}}
+	d := &Dashboard{Trips: map[string]map[string]int{}, Routes: []RouteSummary{}, Outings: []OutingSummary{}}
 	t := &d.Totals
 	err := q.QueryRow(ctx, `
 		SELECT (now() AT TIME ZONE s.timezone)::date::text,
@@ -107,6 +119,31 @@ func GetDashboard(ctx context.Context, q DBTX, schoolID string) (*Dashboard, err
 			return nil, err
 		}
 		d.Routes = append(d.Routes, rs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+
+	rows, err = q.Query(ctx, `
+		SELECT t.id, t.title, t.status, b.vehicle_number, du.name, t.trip_date::text, coalesce(r.code, '')
+		FROM trips t
+		JOIN buses b ON b.id = t.bus_id
+		JOIN drivers d ON d.id = t.driver_id
+		JOIN users du ON du.id = d.user_id
+		LEFT JOIN routes r ON r.id = t.route_id
+		WHERE t.school_id = $1 AND t.trip_date = $2::date AND t.trip_type = 'special_trip' AND t.status <> 'cancelled'
+		ORDER BY t.created_at`, schoolID, d.Today)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var os OutingSummary
+		if err := rows.Scan(&os.TripID, &os.Title, &os.Status, &os.BusNumber, &os.DriverName, &os.TripDate, &os.RouteCode); err != nil {
+			return nil, err
+		}
+		d.Outings = append(d.Outings, os)
 	}
 	return d, rows.Err()
 }

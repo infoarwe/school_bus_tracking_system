@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   App,
   Button,
@@ -15,6 +16,7 @@ import {
 } from 'antd'
 import { DownOutlined, PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StatusTag from '../components/StatusTag'
@@ -38,7 +40,15 @@ function Buses({ schoolId }: { schoolId: string }) {
   const { message } = App.useApp()
   const fetcher = useCallback((p: ListParams) => busesApi.list(schoolId, p), [schoolId])
   const list = useServerList(fetcher)
-  const [editing, setEditing] = useState<Bus | 'new' | null>(null)
+  // ?new=1 (dashboard quick action) opens the form straight away.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [editing, setEditing] = useState<Bus | 'new' | null>(() =>
+    searchParams.get('new') === '1' ? 'new' : null,
+  )
+  const closeForm = () => {
+    setEditing(null)
+    if (searchParams.has('new')) setSearchParams({}, { replace: true })
+  }
 
   async function changeStatus(b: Bus, status: BusStatus) {
     try {
@@ -71,6 +81,14 @@ function Buses({ schoolId }: { schoolId: string }) {
       <Table<Bus>
         rowKey="id"
         loading={list.loading}
+        locale={{
+          emptyText: (
+            <ListEmpty
+              list={list}
+              empty="No buses yet. Add your first bus to start assigning trips."
+            />
+          ),
+        }}
         dataSource={list.rows}
         pagination={list.pagination}
         scroll={{ x: 800 }}
@@ -115,9 +133,9 @@ function Buses({ schoolId }: { schoolId: string }) {
         <BusForm
           schoolId={schoolId}
           bus={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
+          onClose={closeForm}
           onSaved={() => {
-            setEditing(null)
+            closeForm()
             list.reload()
           }}
         />

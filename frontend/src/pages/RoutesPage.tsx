@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   App,
   Button,
@@ -17,6 +17,7 @@ import {
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StatusTag from '../components/StatusTag'
@@ -32,12 +33,13 @@ export default function RoutesPage() {
 export function TripTypeTags({
   route,
 }: {
-  route: Pick<BusRoute, 'supports_pickup' | 'supports_drop'>
+  route: Pick<BusRoute, 'supports_pickup' | 'supports_drop' | 'supports_outing'>
 }) {
   return (
     <Space size={4} wrap>
       {route.supports_pickup && <Tag color="gold">Morning Pickup</Tag>}
       {route.supports_drop && <Tag color="geekblue">Evening Drop</Tag>}
+      {route.supports_outing && <Tag color="purple">Special Trip / Outing</Tag>}
     </Space>
   )
 }
@@ -47,7 +49,15 @@ function Routes({ schoolId }: { schoolId: string }) {
   const navigate = useNavigate()
   const fetcher = useCallback((p: ListParams) => routesApi.list(schoolId, p), [schoolId])
   const list = useServerList(fetcher)
-  const [editing, setEditing] = useState<BusRoute | 'new' | null>(null)
+  // ?new=1 (dashboard quick action) opens the form straight away.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [editing, setEditing] = useState<BusRoute | 'new' | null>(() =>
+    searchParams.get('new') === '1' ? 'new' : null,
+  )
+  const closeForm = () => {
+    setEditing(null)
+    if (searchParams.has('new')) setSearchParams({}, { replace: true })
+  }
 
   async function toggleStatus(r: BusRoute) {
     const next = r.status === 'active' ? 'inactive' : 'active'
@@ -81,6 +91,14 @@ function Routes({ schoolId }: { schoolId: string }) {
       <Table<BusRoute>
         rowKey="id"
         loading={list.loading}
+        locale={{
+          emptyText: (
+            <ListEmpty
+              list={list}
+              empty="No routes yet. Create a route, then add its stops on the map."
+            />
+          ),
+        }}
         dataSource={list.rows}
         pagination={list.pagination}
         scroll={{ x: 900 }}
@@ -138,10 +156,10 @@ function Routes({ schoolId }: { schoolId: string }) {
         <RouteForm
           schoolId={schoolId}
           route={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
+          onClose={closeForm}
           onSaved={(saved) => {
-            setEditing(null)
-            if (editing === 'new') navigate(`/routes/${saved.id}`)
+            closeForm()
+            if (editing === 'new') navigate(`/routes/${saved.id}?setup=1`)
             else list.reload()
           }}
         />
@@ -166,8 +184,8 @@ export function RouteForm({
   const [saving, setSaving] = useState(false)
 
   async function save(v: RouteInput) {
-    if (!v.supports_pickup && !v.supports_drop) {
-      message.error('Choose Morning Pickup, Evening Drop, or both.')
+    if (!v.supports_pickup && !v.supports_drop && !v.supports_outing) {
+      message.error('Choose at least one: Morning Pickup, Evening Drop or Special Trip/Outing.')
       return
     }
     setSaving(true)
@@ -175,7 +193,9 @@ export function RouteForm({
       const saved = route
         ? await routesApi.update(schoolId, route.id, v)
         : await routesApi.create(schoolId, v)
-      message.success(route ? 'Route updated.' : 'Route created. Now add its stops.')
+      message.success(
+        route ? 'Route updated.' : `Route ${saved.code} created. Next: add its stops.`,
+      )
       onSaved(saved)
     } catch (e) {
       const msg = applyApiErrors(form, e)
@@ -188,8 +208,8 @@ export function RouteForm({
   return (
     <Modal
       open
-      title={route ? `Edit ${route.code}` : 'Add route'}
-      okText="Save"
+      title={route ? `Edit ${route.code}` : 'New route: step 1 of 3, details'}
+      okText={route ? 'Save' : 'Save and add stops'}
       confirmLoading={saving}
       onOk={() => form.submit()}
       onCancel={onClose}
@@ -221,13 +241,23 @@ export function RouteForm({
             </Form.Item>
           </Col>
           <Col span={24}>
-            <Form.Item label="Used for" required>
-              <Space>
+            <Form.Item
+              label="Trip types"
+              required
+              extra="A route can support more than one — it is reusable across daily trips and special outings."
+            >
+              <Space direction="vertical" size={4}>
                 <Form.Item name="supports_pickup" valuePropName="checked" noStyle>
-                  <Checkbox>Morning Pickup</Checkbox>
+                  <Checkbox>Morning Pickup — the daily school-run pickup</Checkbox>
                 </Form.Item>
                 <Form.Item name="supports_drop" valuePropName="checked" noStyle>
-                  <Checkbox>Evening Drop</Checkbox>
+                  <Checkbox>Evening Drop — the daily school-run drop</Checkbox>
+                </Form.Item>
+                <Form.Item name="supports_outing" valuePropName="checked" noStyle>
+                  <Checkbox>
+                    Special Trip / Outing — reusable as a template for one-off trips (e.g. a
+                    recurring museum or sports-day route)
+                  </Checkbox>
                 </Form.Item>
               </Space>
             </Form.Item>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Alert,
   App,
@@ -15,12 +16,20 @@ import {
   Segmented,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   Timeline,
   Typography,
 } from 'antd'
-import { CopyOutlined, DownOutlined, HistoryOutlined, PlusOutlined } from '@ant-design/icons'
+import {
+  CopyOutlined,
+  DownOutlined,
+  HistoryOutlined,
+  MinusCircleOutlined,
+  PlusOutlined,
+} from '@ant-design/icons'
+import LocationSearch from '../components/LocationSearch'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StopProgressList from '../components/StopProgressList'
@@ -39,6 +48,7 @@ import {
   type TripInput,
   type TripStatus,
   type TripType,
+  type WaypointInput,
 } from '../services/types'
 import { addDays, formatDate, todayIn, weekdayOf } from '../utils/dates'
 import { applyApiErrors, errorMessage } from '../utils/formErrors'
@@ -71,7 +81,12 @@ function Trips({ schoolId }: { schoolId: string }) {
   const { message } = App.useApp()
   const { school } = useCurrentSchool()
   const today = todayIn(school?.timezone)
-  const [date, setDate] = useState(today)
+  // ?date=YYYY-MM-DD opens that day (links from staff notifications).
+  const [searchParams] = useSearchParams()
+  const [date, setDate] = useState(() => {
+    const d = searchParams.get('date') ?? ''
+    return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : today
+  })
   const [tripType, setTripType] = useState<TripType>('morning_pickup')
   const [dayTrips, setDayTrips] = useState<Trip[]>([])
   const [masters, setMasters] = useState<Masters>({ routes: [], buses: [], drivers: [] })
@@ -116,10 +131,19 @@ function Trips({ schoolId }: { schoolId: string }) {
   const trips = dayTrips.filter((t) => t.trip_type === tripType)
   const active = trips.filter((t) => t.status !== 'cancelled')
   const runsType = (r: BusRoute) =>
-    tripType === 'morning_pickup' ? r.supports_pickup : r.supports_drop
-  const unassigned = masters.routes.filter(
-    (r) => runsType(r) && r.stop_count > 0 && !active.some((t) => t.route.id === r.id),
-  )
+    tripType === 'morning_pickup'
+      ? r.supports_pickup
+      : tripType === 'evening_drop'
+        ? r.supports_drop
+        : r.supports_outing
+  // Special trips are one-off, not a daily obligation per route, so there is no
+  // "unassigned route" nudge for them.
+  const unassigned =
+    tripType === 'special_trip'
+      ? []
+      : masters.routes.filter(
+          (r) => runsType(r) && r.stop_count > 0 && !active.some((t) => t.route?.id === r.id),
+        )
   const past = date < today
 
   return (
@@ -176,6 +200,10 @@ function Trips({ schoolId }: { schoolId: string }) {
               value: 'evening_drop',
               label: `Evening Drop (${dayTrips.filter((t) => t.trip_type === 'evening_drop' && t.status !== 'cancelled').length})`,
             },
+            {
+              value: 'special_trip',
+              label: `Special Trip / Outing (${dayTrips.filter((t) => t.trip_type === 'special_trip' && t.status !== 'cancelled').length})`,
+            },
           ]}
         />
       </Flex>
@@ -210,7 +238,18 @@ function Trips({ schoolId }: { schoolId: string }) {
             title: 'Route',
             render: (_, t) => (
               <a onClick={() => setViewing(t.id)}>
-                <strong>{t.route.code}</strong> · {t.route.name}
+                {t.trip_type === 'special_trip' && (
+                  <Tag color="purple" style={{ marginInlineEnd: 6 }}>
+                    Outing
+                  </Tag>
+                )}
+                {t.route ? (
+                  <>
+                    <strong>{t.route.code}</strong> · {t.route.name}
+                  </>
+                ) : (
+                  <strong>{t.title}</strong>
+                )}
               </a>
             ),
           },
@@ -223,6 +262,15 @@ function Trips({ schoolId }: { schoolId: string }) {
             render: (_, t) => (
               <>
                 {t.driver.name}
+                {t.assigned_by === 'driver' && (
+                  <Tag
+                    color="purple"
+                    style={{ marginInlineStart: 6 }}
+                    title="The driver took this route in the Driver app"
+                  >
+                    Self-assigned
+                  </Tag>
+                )}
                 <br />
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   {t.driver.mobile}
@@ -363,23 +411,37 @@ function TripForm({
   const [form] = Form.useForm<TripInput>()
   const [saving, setSaving] = useState(false)
   const type = trip?.trip_type ?? tripType
+  const special = type === 'special_trip'
+  const routeId = Form.useWatch('route_id', form)
 
   // Buses and drivers already used in this slot (other than by this trip) cannot be chosen.
   const used = useMemo(() => {
     const slot = dayTrips.filter(
       (t) => t.trip_type === type && t.status !== 'cancelled' && t.id !== trip?.id,
     )
+    const label = (t: Trip) => t.route?.code ?? t.title
     return {
-      routes: new Set(slot.map((t) => t.route.id)),
-      buses: new Map(slot.map((t) => [t.bus.id, t.route.code])),
-      drivers: new Map(slot.map((t) => [t.driver.id, t.route.code])),
+      routes: new Set(slot.map((t) => t.route?.id).filter((id): id is string => !!id)),
+      buses: new Map(slot.map((t) => [t.bus.id, label(t)])),
+      drivers: new Map(slot.map((t) => [t.driver.id, label(t)])),
     }
   }, [dayTrips, type, trip])
 
   async function save(v: TripInput) {
     setSaving(true)
     try {
-      const input = { ...v, trip_date: trip?.trip_date ?? date, trip_type: type }
+      const input: TripInput = { ...v, trip_date: trip?.trip_date ?? date, trip_type: type }
+      if (!special) {
+        delete input.title
+        delete input.notify_parents
+        delete input.waypoints
+      } else if (input.route_id) {
+        // A route-based outing follows that route's own stops; waypoints don't apply.
+        delete input.waypoints
+      } else {
+        delete input.route_id
+        delete input.notify_parents // no template route: nothing to notify
+      }
       if (trip) await tripsApi.update(schoolId, trip.id, input)
       else await tripsApi.create(schoolId, input)
       message.success(trip ? 'Trip updated.' : 'Trip assigned.')
@@ -393,18 +455,23 @@ function TripForm({
   }
 
   const routes = masters.routes.filter((r) =>
-    type === 'morning_pickup' ? r.supports_pickup : r.supports_drop,
+    type === 'morning_pickup'
+      ? r.supports_pickup
+      : type === 'evening_drop'
+        ? r.supports_drop
+        : r.supports_outing,
   )
 
   return (
     <Modal
       open
       title={`${trip ? 'Edit' : 'Assign'} ${tripTypeLabels[type]} · ${formatDate(trip?.trip_date ?? date)}`}
-      okText="Save"
+      okText={trip ? 'Save' : 'Assign trip'}
       confirmLoading={saving}
       onOk={() => form.submit()}
       onCancel={onClose}
       destroyOnHidden
+      width={special ? 640 : undefined}
     >
       {trip?.status === 'confirmed' && (
         <Alert
@@ -421,25 +488,142 @@ function TripForm({
         initialValues={
           trip
             ? {
-                route_id: trip.route.id,
+                route_id: trip.route?.id,
                 bus_id: trip.bus.id,
                 driver_id: trip.driver.id,
                 notes: trip.notes,
+                title: trip.title,
+                notify_parents: trip.notify_parents,
+                waypoints: [],
               }
-            : { route_id: initialRouteId }
+            : { route_id: initialRouteId, notify_parents: true }
         }
       >
-        <Form.Item name="route_id" label="Route" rules={[{ required: true }]}>
+        {special && (
+          <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
+            Pick a template route to reuse its stops and notify its usual parents, or leave it blank
+            and add your own destinations below — School → destinations → School.
+          </Typography.Paragraph>
+        )}
+        <Form.Item
+          name="route_id"
+          label={special ? 'Template route (optional)' : 'Route'}
+          rules={special ? [] : [{ required: true, message: 'Choose a route.' }]}
+          extra={
+            routes.length === 0 && !special
+              ? `No active route runs . Set it on the route (Routes & Stops).`
+              : undefined
+          }
+        >
           <Select
+            allowClear={special}
             showSearch={{ optionFilterProp: 'label' }}
+            placeholder={special ? 'No template — ad-hoc destinations below' : undefined}
             options={routes.map((r) => ({
               value: r.id,
-              label: `${r.code} · ${r.name}`,
-              disabled: r.stop_count === 0 || used.routes.has(r.id),
+              label: `${r.code} · ${r.name}${used.routes.has(r.id) ? ' (already has this trip)' : !special && r.stop_count === 0 ? ' (no stops yet)' : ''}`,
+              disabled: (!special && r.stop_count === 0) || used.routes.has(r.id),
             }))}
           />
         </Form.Item>
-        <Form.Item name="bus_id" label="Bus" rules={[{ required: true }]}>
+        {special && !routeId && (
+          <>
+            <Form.Item
+              name="title"
+              label="Outing name"
+              rules={[{ required: true, message: "Name this outing, e.g. 'Science Museum Trip'." }]}
+            >
+              <Input placeholder="e.g. Science Museum Trip" maxLength={200} />
+            </Form.Item>
+            <Form.List name="waypoints">
+              {(fields, { add, remove }) => (
+                <div style={{ marginBottom: 24 }}>
+                  <Typography.Text strong>Destinations</Typography.Text>
+                  <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+                    In travel order. The bus always starts and ends at school.
+                  </Typography.Paragraph>
+                  {fields.map((field, i) => (
+                    <Flex key={field.key} gap="small" align="start" style={{ marginBottom: 8 }}>
+                      <div style={{ flex: 1 }}>
+                        <LocationSearch
+                          placeholder={`Find destination ${i + 1}…`}
+                          onSelect={(place) => {
+                            const row = form.getFieldValue(['waypoints', field.name]) as
+                              WaypointInput | undefined
+                            form.setFields([
+                              {
+                                name: ['waypoints', field.name],
+                                value: {
+                                  ...row,
+                                  name: row?.name || place.name,
+                                  landmark: place.address,
+                                  latitude: place.latitude,
+                                  longitude: place.longitude,
+                                },
+                              },
+                            ])
+                          }}
+                        />
+                        <Flex gap="small" style={{ marginTop: 4 }}>
+                          <Form.Item
+                            name={[field.name, 'name']}
+                            rules={[{ required: true, message: 'Name is required.' }]}
+                            style={{ flex: 1, marginBottom: 0 }}
+                          >
+                            <Input placeholder="Name" maxLength={200} />
+                          </Form.Item>
+                          <Form.Item
+                            name={[field.name, 'latitude']}
+                            rules={[{ required: true, message: 'Pick a location.' }]}
+                            style={{ width: 110, marginBottom: 0 }}
+                          >
+                            <InputNumber
+                              placeholder="Lat"
+                              precision={6}
+                              style={{ width: '100%' }}
+                            />
+                          </Form.Item>
+                          <Form.Item
+                            name={[field.name, 'longitude']}
+                            rules={[{ required: true, message: 'Pick a location.' }]}
+                            style={{ width: 110, marginBottom: 0 }}
+                          >
+                            <InputNumber
+                              placeholder="Lng"
+                              precision={6}
+                              style={{ width: '100%' }}
+                            />
+                          </Form.Item>
+                        </Flex>
+                      </div>
+                      <Button
+                        icon={<MinusCircleOutlined />}
+                        onClick={() => remove(field.name)}
+                        aria-label="Remove destination"
+                      />
+                    </Flex>
+                  ))}
+                  <Button
+                    icon={<PlusOutlined />}
+                    onClick={() => add({ name: '', landmark: '', geofence_radius_m: 100 })}
+                  >
+                    Add destination
+                  </Button>
+                </div>
+              )}
+            </Form.List>
+          </>
+        )}
+        <Form.Item
+          name="bus_id"
+          label="Bus"
+          rules={[{ required: true, message: 'Choose a bus.' }]}
+          extra={
+            masters.buses.length === 0
+              ? 'No active buses. Add or activate one on the Buses page.'
+              : 'Buses already on another route in this slot are greyed out.'
+          }
+        >
           <Select
             showSearch={{ optionFilterProp: 'label' }}
             options={masters.buses.map((b) => ({
@@ -451,7 +635,16 @@ function TripForm({
             }))}
           />
         </Form.Item>
-        <Form.Item name="driver_id" label="Driver" rules={[{ required: true }]}>
+        <Form.Item
+          name="driver_id"
+          label="Driver"
+          rules={[{ required: true, message: 'Choose a driver.' }]}
+          extra={
+            masters.drivers.length === 0
+              ? 'No active drivers. Add or activate one on the Drivers page.'
+              : undefined
+          }
+        >
           <Select
             showSearch={{ optionFilterProp: 'label' }}
             options={masters.drivers.map((d) => ({
@@ -463,6 +656,20 @@ function TripForm({
             }))}
           />
         </Form.Item>
+        {special && (
+          <Form.Item
+            name="notify_parents"
+            label="Notify parents"
+            valuePropName="checked"
+            tooltip={
+              routeId
+                ? "Tell the template route's usual parents when this outing starts, is delayed or completes."
+                : 'Pick a template route above to enable parent notifications for this outing. Staff can always view and track it either way.'
+            }
+          >
+            <Switch disabled={!routeId} />
+          </Form.Item>
+        )}
         <Form.Item name="notes" label="Notes">
           <Input.TextArea rows={2} maxLength={500} />
         </Form.Item>
@@ -511,7 +718,7 @@ function ReasonModal({
   return (
     <Modal
       open
-      title={`${titles[action]}: ${trip.route.code}`}
+      title={`${titles[action]}: ${trip.route?.code ?? trip.title}`}
       okText="Confirm"
       okButtonProps={{
         danger: action === 'cancel' || action === 'cancelled',
@@ -607,8 +814,9 @@ function CopyModal({
       onCancel={onClose}
     >
       <Typography.Paragraph type="secondary">
-        Both Morning Pickup and Evening Drop are copied with the same route, bus and driver. Trips
-        that would clash with existing ones are skipped and listed.
+        Morning Pickup, Evening Drop and Special Trip/Outing are all copied with the same route (or
+        outing details) and the same bus and driver. Trips that would clash with existing ones are
+        skipped and listed.
       </Typography.Paragraph>
       <Flex gap="middle" wrap align="end">
         <div>
@@ -672,7 +880,7 @@ function TripDrawer({
       onClose={onClose}
       size="large"
       loading={!trip}
-      title={trip && `${trip.route.code} · ${tripTypeLabels[trip.trip_type]}`}
+      title={trip && `${trip.route?.code ?? trip.title} · ${tripTypeLabels[trip.trip_type]}`}
     >
       {trip && (
         <Flex vertical gap="large">
@@ -682,10 +890,26 @@ function TripDrawer({
               <TripStatusTag status={trip.status} />
               {trip.cancel_reason && ` ${trip.cancel_reason}`}
             </Descriptions.Item>
-            <Descriptions.Item label="Route">{`${trip.route.code} · ${trip.route.name}`}</Descriptions.Item>
+            <Descriptions.Item label={trip.route ? 'Route' : 'Outing'}>
+              {trip.route ? `${trip.route.code} · ${trip.route.name}` : trip.title}
+            </Descriptions.Item>
             <Descriptions.Item label="Bus">{`${trip.bus.vehicle_number} (${trip.bus.capacity} seats)`}</Descriptions.Item>
             <Descriptions.Item label="Driver">{`${trip.driver.name} · ${trip.driver.mobile}`}</Descriptions.Item>
+            <Descriptions.Item label="Assigned by">
+              {trip.assigned_by === 'driver'
+                ? 'The driver (took it in the Driver app)'
+                : 'School staff'}
+            </Descriptions.Item>
             <Descriptions.Item label="Students">{trip.student_count}</Descriptions.Item>
+            {trip.trip_type === 'special_trip' && (
+              <Descriptions.Item label="Notify parents">
+                {trip.route
+                  ? trip.notify_parents
+                    ? "Yes — the template route's usual parents"
+                    : 'No'
+                  : 'No — this outing has no template route'}
+              </Descriptions.Item>
+            )}
             {trip.notes && <Descriptions.Item label="Notes">{trip.notes}</Descriptions.Item>}
           </Descriptions>
           {trip.started_at && (
@@ -701,7 +925,7 @@ function TripDrawer({
             <TripReplay
               schoolId={schoolId}
               tripId={trip.id}
-              title={`${trip.route.code} · ${tripTypeLabels[trip.trip_type]} · ${formatDate(trip.trip_date)}`}
+              title={`${trip.route?.code ?? trip.title} · ${tripTypeLabels[trip.trip_type]} · ${formatDate(trip.trip_date)}`}
               stops={trip.stops}
               onClose={() => setReplaying(false)}
             />
@@ -752,7 +976,12 @@ function TripDrawer({
                 { title: '#', dataIndex: 'sequence', width: 50 },
                 { title: 'Stop', dataIndex: 'name' },
                 {
-                  title: trip.trip_type === 'morning_pickup' ? 'Pickup' : 'Drop',
+                  title:
+                    trip.trip_type === 'morning_pickup'
+                      ? 'Pickup'
+                      : trip.trip_type === 'evening_drop'
+                        ? 'Drop'
+                        : 'Scheduled',
                   render: (_, s) =>
                     (trip.trip_type === 'morning_pickup' ? s.pickup_time : s.drop_time) ?? '—',
                 },

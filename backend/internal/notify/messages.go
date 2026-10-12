@@ -24,17 +24,25 @@ const (
 type Message struct{ Title, Body string }
 
 func tripLabel(tripType string) string {
-	if tripType == "evening_drop" {
+	switch tripType {
+	case "evening_drop":
 		return "Evening Drop"
+	case "special_trip":
+		return "Special Trip"
+	default:
+		return "Morning Pickup"
 	}
-	return "Morning Pickup"
 }
 
 func BusStarted(tripType, busNumber string) Message {
-	if tripType == "evening_drop" {
+	switch tripType {
+	case "evening_drop":
 		return Message{"Bus started", fmt.Sprintf("Bus Started from School (%s).", busNumber)}
+	case "special_trip":
+		return Message{"Bus started", fmt.Sprintf("The Special Trip bus (%s) has started its journey.", busNumber)}
+	default:
+		return Message{"Bus started", fmt.Sprintf("The Morning Pickup bus (%s) has started its route.", busNumber)}
 	}
-	return Message{"Bus started", fmt.Sprintf("The Morning Pickup bus (%s) has started its route.", busNumber)}
 }
 
 // Approaching includes the ETA when known: "Estimated arrival: 8 minutes."
@@ -62,8 +70,11 @@ func Crossed(missed bool) Message {
 
 func Delayed(minutes int, tripType string) Message {
 	where := "pickup"
-	if tripType == "evening_drop" {
+	switch tripType {
+	case "evening_drop":
 		where = "drop"
+	case "special_trip":
+		where = "destination"
 	}
 	return Message{"Bus delayed", fmt.Sprintf("Bus Delayed by %d Minutes. Please expect a delay in reaching your %s location.", minutes, where)}
 }

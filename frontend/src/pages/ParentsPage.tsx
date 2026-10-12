@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  Alert,
   App,
   Button,
   Col,
@@ -17,6 +18,7 @@ import {
 } from 'antd'
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StatusTag from '../components/StatusTag'
@@ -24,6 +26,7 @@ import { useAuth } from '../context/AuthContext'
 import { useServerList } from '../hooks/useServerList'
 import { parentsApi, studentsApi } from '../services/people'
 import type { ChildLink, ListParams, Parent, ParentInput } from '../services/types'
+import { mobileDigits } from '../utils/mobile'
 import { applyApiErrors, errorMessage } from '../utils/formErrors'
 
 const RELATIONSHIPS = [
@@ -84,6 +87,14 @@ function Parents({ schoolId }: { schoolId: string }) {
         expandable={{ childrenColumnName: '__no_tree_rows' }}
         rowKey="id"
         loading={list.loading}
+        locale={{
+          emptyText: (
+            <ListEmpty
+              list={list}
+              empty="No parents yet. Parents are usually added while registering a student."
+            />
+          ),
+        }}
         dataSource={list.rows}
         pagination={list.pagination}
         scroll={{ x: 900 }}
@@ -152,9 +163,11 @@ function Parents({ schoolId }: { schoolId: string }) {
       />
       {editing && (
         <ParentForm
+          key={editing === 'new' ? 'new' : editing.id}
           schoolId={schoolId}
           parent={editing === 'new' ? null : editing}
           onClose={() => setEditing(null)}
+          onOpenExisting={setEditing}
           onSaved={() => {
             setEditing(null)
             list.reload()
@@ -170,17 +183,49 @@ function ParentForm({
   parent,
   onClose,
   onSaved,
+  onOpenExisting,
 }: {
   schoolId: string
   parent: Parent | null
   onClose: () => void
   onSaved: () => void
+  /** Switch to editing a parent that already has the typed mobile number. */
+  onOpenExisting: (p: Parent) => void
 }) {
   const [form] = Form.useForm<ParentInput>()
   const { message } = App.useApp()
   const [saving, setSaving] = useState(false)
+  const digits = mobileDigits(Form.useWatch('mobile', form))
+  const [duplicate, setDuplicate] = useState<{ digits: string; parent: Parent | null } | null>(null)
+  const existing =
+    digits && duplicate?.digits === digits && duplicate.parent?.id !== parent?.id
+      ? duplicate.parent
+      : null
+
+  // A mobile number is one login: find a parent who already has it before creating another.
+  useEffect(() => {
+    if (!digits) return
+    let cancelled = false
+    const t = setTimeout(() => {
+      parentsApi
+        .list(schoolId, { q: digits, page_size: 5 })
+        .then((res) => {
+          const match = res.data.find((p) => mobileDigits(p.mobile) === digits) ?? null
+          if (!cancelled) setDuplicate({ digits, parent: match })
+        })
+        .catch(() => {}) // the server still refuses a duplicate on save
+    }, 350)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [digits, schoolId])
 
   async function save(v: ParentInput) {
+    if (existing) {
+      message.error(`${existing.name} already has this mobile number. Open that parent instead.`)
+      return
+    }
     setSaving(true)
     try {
       const input = { ...v, children: v.children ?? [] }
@@ -236,12 +281,40 @@ function ParentForm({
             <Form.Item
               name="mobile"
               label="Mobile (app login)"
-              rules={[{ required: true }]}
+              rules={[
+                { required: true, message: 'Enter the mobile number.' },
+                {
+                  validator: (_, v: string | undefined) =>
+                    !v || mobileDigits(v)
+                      ? Promise.resolve()
+                      : Promise.reject(new Error('Enter a valid 10-digit mobile number.')),
+                },
+              ]}
               extra={parent ? 'Changing this changes the number they log in with.' : undefined}
             >
-              <Input inputMode="tel" placeholder="98765 43210" />
+              <Input inputMode="tel" placeholder="98765 43210" prefix="+91" />
             </Form.Item>
           </Col>
+          {existing && (
+            <Col span={24}>
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16 }}
+                title={`${existing.name} already uses this mobile number.`}
+                description={
+                  existing.children.length
+                    ? `Linked children: ${existing.children.map((c) => c.name).join(', ')}. Add more children to that parent instead of creating a second account.`
+                    : 'Add children to that parent instead of creating a second account.'
+                }
+                action={
+                  <Button size="small" type="primary" onClick={() => onOpenExisting(existing)}>
+                    Open {existing.name}
+                  </Button>
+                }
+              />
+            </Col>
+          )}
           <Col xs={24} md={12}>
             <Form.Item name="alternate_mobile" label="Alternate mobile">
               <Input inputMode="tel" />
@@ -259,29 +332,55 @@ function ParentForm({
           </Col>
         </Row>
 
-        <Typography.Title level={5}>Children</Typography.Title>
+        <div className="form-section-title">Linked children</div>
+        <Typography.Paragraph type="secondary" style={{ marginTop: -4 }}>
+          The parent sees each child's route, stop and bus in the Parent app. Routes come from the
+          student's assignment, not from the parent.
+        </Typography.Paragraph>
         <Form.List name="children">
           {(fields, { add, remove }) => (
             <>
-              {fields.map((field) => (
-                <Flex key={field.key} gap="small" align="start">
-                  <Form.Item
-                    name={[field.name, 'student_id']}
-                    rules={[{ required: true, message: 'Choose a student' }]}
-                    style={{ flex: 1 }}
-                  >
-                    <StudentPicker schoolId={schoolId} known={parent?.children ?? []} />
-                  </Form.Item>
-                  <Form.Item name={[field.name, 'relationship']} initialValue="guardian">
-                    <Select options={RELATIONSHIPS} style={{ width: 120 }} />
-                  </Form.Item>
-                  <Button
-                    icon={<DeleteOutlined />}
-                    aria-label="Remove child"
-                    onClick={() => remove(field.name)}
-                  />
-                </Flex>
-              ))}
+              {fields.map((field) => {
+                const studentId = form.getFieldValue(['children', field.name, 'student_id']) as
+                  string | undefined
+                const linked = parent?.children.find((c) => c.student_id === studentId)
+                return (
+                  <Flex key={field.key} gap="small" align="start" wrap>
+                    <Form.Item
+                      name={[field.name, 'student_id']}
+                      rules={[{ required: true, message: 'Choose a student' }]}
+                      style={{ flex: 1, minWidth: 220 }}
+                    >
+                      <StudentPicker schoolId={schoolId} known={parent?.children ?? []} />
+                    </Form.Item>
+                    <Form.Item name={[field.name, 'relationship']} initialValue="guardian">
+                      <Select
+                        options={RELATIONSHIPS}
+                        style={{ width: 120 }}
+                        aria-label="Relationship"
+                      />
+                    </Form.Item>
+                    {linked ? (
+                      // Unlinking hides the child from this parent's app: confirm first.
+                      <Popconfirm
+                        title={`Unlink ${linked.name}?`}
+                        description="After saving, this parent no longer sees the child in the app."
+                        okText="Unlink"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={() => remove(field.name)}
+                      >
+                        <Button icon={<DeleteOutlined />} aria-label={`Unlink ${linked.name}`} />
+                      </Popconfirm>
+                    ) : (
+                      <Button
+                        icon={<DeleteOutlined />}
+                        aria-label="Remove this row"
+                        onClick={() => remove(field.name)}
+                      />
+                    )}
+                  </Flex>
+                )
+              })}
               <Button icon={<PlusOutlined />} onClick={() => add()} block type="dashed">
                 Link a child
               </Button>

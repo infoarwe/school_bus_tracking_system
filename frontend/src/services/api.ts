@@ -13,13 +13,58 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly fields?: Record<string, string>
+  /** X-Request-ID of the failed call: lets support find it in the server log. */
+  readonly requestId?: string
 
-  constructor(status: number, body: ApiErrorBody) {
+  constructor(status: number, body: ApiErrorBody, requestId?: string) {
     super(body.message)
     this.status = status
     this.code = body.code
     this.fields = body.fields
+    this.requestId = requestId
   }
+}
+
+/**
+ * The error for a response without our JSON error body (proxy errors, timeouts, no
+ * network). Never shows raw server output to the user.
+ */
+function transportError(err: AxiosError): ApiError {
+  const status = err.response?.status ?? 0
+  const requestId = err.response?.headers?.['x-request-id'] as string | undefined
+  if (!err.response) {
+    const timedOut = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT'
+    return new ApiError(0, {
+      code: timedOut ? 'timeout' : 'network_error',
+      message: timedOut
+        ? 'The server took too long to answer. Check your connection and try again.'
+        : 'Cannot reach the server. Check your internet connection and try again.',
+    })
+  }
+  if (status === 413) {
+    return new ApiError(status, { code: 'too_large', message: 'The file is too large to upload.' })
+  }
+  if (status === 429) {
+    return new ApiError(status, {
+      code: 'rate_limited',
+      message: 'Too many requests. Wait a few seconds and try again.',
+    })
+  }
+  if (status >= 500) {
+    return new ApiError(
+      status,
+      {
+        code: 'server_unavailable',
+        message: 'The server is temporarily unavailable. Please try again in a minute.',
+      },
+      requestId,
+    )
+  }
+  return new ApiError(
+    status,
+    { code: 'unexpected_response', message: `Unexpected answer from the server (${status}).` },
+    requestId,
+  )
 }
 
 const baseURL = import.meta.env.VITE_API_URL ?? ''
@@ -75,14 +120,7 @@ api.interceptors.response.use(
   (res) => res,
   async (err: AxiosError<{ error?: ApiErrorBody }>) => {
     const body = err.response?.data?.error
-    if (!err.response || !body) {
-      return Promise.reject(
-        new ApiError(err.response?.status ?? 0, {
-          code: 'network_error',
-          message: 'Cannot reach the server. Check your connection.',
-        }),
-      )
-    }
+    if (!err.response || !body) return Promise.reject(transportError(err))
 
     const config = err.config as RetryConfig | undefined
     // Login, refresh and OTP calls report their own errors; never refresh or redirect for them.
@@ -96,7 +134,21 @@ api.interceptors.response.use(
       }
     }
 
-    const apiErr = new ApiError(err.response.status, body)
+    const requestId = err.response.headers['x-request-id'] as string | undefined
+    const status = err.response.status
+    const apiErr = new ApiError(
+      status,
+      status >= 500
+        ? {
+            ...body,
+            // The server never sends details for a 500; give staff something to report.
+            message:
+              'Something went wrong on the server. Please try again; if it keeps happening, ' +
+              `report reference ${requestId ?? 'unknown'}.`,
+          }
+        : body,
+      requestId,
+    )
     if (SESSION_LOST.has(body.code) && !isAuthCall) {
       tokenStore.clear()
       onSessionLost(apiErr)

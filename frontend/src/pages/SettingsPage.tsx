@@ -91,14 +91,15 @@ function MapsSettingsCard({ schoolId }: { schoolId: string }) {
           onFinish={save}
         >
           <Typography.Paragraph type="secondary">
-            Each school uses its own Google Maps keys from its Google Cloud project. Without a
-            browser key the admin maps use OpenStreetMap.
+            Each school uses its own Google Maps keys from its Google Cloud project. Google Maps is
+            the only map provider: without a browser key, maps and place search are unavailable for
+            this school until one is added here.
           </Typography.Paragraph>
 
           <Form.Item
             name="browser_key"
             label="Browser key (maps in the admin web)"
-            extra="Enable the Maps JavaScript API. In Google Cloud, restrict it to your admin web's domain (HTTP referrers). All staff of this school can see this key."
+            extra="Enable the Maps JavaScript API and Places API (New) (place search when adding stops). In Google Cloud, restrict it to your admin web's domain (HTTP referrers). All staff of this school can see this key."
           >
             <Input placeholder="AIza…" allowClear autoComplete="off" />
           </Form.Item>
@@ -129,10 +130,10 @@ function MapsSettingsCard({ schoolId }: { schoolId: string }) {
           )}
           {!current.browser_key && (
             <Alert
-              type="info"
+              type="warning"
               showIcon
               style={{ marginBottom: 16 }}
-              title="Maps currently use OpenStreetMap for this school."
+              title="No browser key yet: maps and place search are unavailable for this school."
             />
           )}
           <Button type="primary" htmlType="submit" loading={saving}>

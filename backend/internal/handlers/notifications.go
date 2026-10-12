@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -18,14 +19,51 @@ import (
 
 // --- Automatic notifications (S7-03) ---
 
+// routeIDPtr returns &t.Route.ID, or nil when the trip has no route (a routeless
+// Special Trip/Outing).
+func routeIDPtr(t *models.Trip) *string {
+	if t.Route == nil {
+		return nil
+	}
+	return &t.Route.ID
+}
+
 func tripData(t *models.Trip) map[string]string {
-	return map[string]string{"trip_id": t.ID, "route_id": t.Route.ID, "trip_type": t.TripType}
+	routeID := ""
+	if t.Route != nil {
+		routeID = t.Route.ID
+	}
+	return map[string]string{"trip_id": t.ID, "route_id": routeID, "trip_type": t.TripType}
+}
+
+// tripRiders finds this trip's parents to notify. For morning_pickup/evening_drop
+// it is the usual per-stop riders. For special_trip it is every parent with a
+// student on the template route (store.RouteRiders) — an outing isn't itself a
+// pickup or a drop, so TripRiders' pickup/drop-stop CASE does not apply (and
+// would wrongly require a drop_stop_id even on a pickup-only template route). A
+// routeless outing has no riders at all. q is the pool for a post-commit call
+// (notifyTrip) or the live transaction for an in-transaction call (reportDelay).
+func tripRiders(ctx context.Context, q store.DBTX, t *models.Trip, stopID string) ([]store.Rider, error) {
+	if t.TripType == models.TripSpecial {
+		if t.Route == nil {
+			return nil, nil
+		}
+		return store.RouteRiders(ctx, q, t.SchoolID, t.Route.ID)
+	}
+	return store.TripRiders(ctx, q, t.ID, stopID)
 }
 
 // notifyTrip sends one automatic notification to the parents of the trip's riders
 // (optionally only those at stopID). The dedupe key makes it fire at most once.
+// A Special Trip/Outing with notify_parents=false is opt-out of every automatic
+// notification here — admin/staff read paths (GetTrip, TripProgress, the
+// dashboard, the live map) never call through this function, so they are
+// completely unaffected by this gate.
 func (a *API) notifyTrip(ctx context.Context, t *models.Trip, typ string, msg notify.Message, stopID, dedupe string, extra map[string]string) error {
-	riders, err := store.TripRiders(ctx, a.Store.Pool, t.ID, stopID)
+	if t.TripType == models.TripSpecial && !t.NotifyParents {
+		return nil
+	}
+	riders, err := tripRiders(ctx, a.Store.Pool, t, stopID)
 	if err != nil {
 		return err
 	}
@@ -35,7 +73,7 @@ func (a *API) notifyTrip(ctx context.Context, t *models.Trip, typ string, msg no
 	}
 	_, _, err = notify.Notify(ctx, a.Store.Pool, store.NotificationInput{
 		SchoolID: t.SchoolID, Type: typ, Title: msg.Title, Body: msg.Body, Data: data,
-		TripID: &t.ID, RouteID: &t.Route.ID, DedupeKey: &dedupe,
+		TripID: &t.ID, RouteID: routeIDPtr(t), DedupeKey: &dedupe,
 	}, riders)
 	return err
 }
@@ -49,9 +87,12 @@ func (a *API) notifyTripStatus(ctx context.Context, t *models.Trip) error {
 		return a.notifyTrip(ctx, t, notify.TypeTripCompleted, notify.TripCompleted(t.TripType), "", "trip:"+t.ID+":completed", nil)
 	case models.TripCancelled:
 		msg := notify.Message{Title: "Trip cancelled", Body: "Today's bus trip has been cancelled."}
-		if t.TripType == models.TripEveningDrop {
+		switch t.TripType {
+		case models.TripEveningDrop:
 			msg.Body = "Today's Evening Drop trip has been cancelled."
-		} else {
+		case models.TripSpecial:
+			msg.Body = fmt.Sprintf("The %s trip has been cancelled.", tripLabel(t))
+		default:
 			msg.Body = "Today's Morning Pickup trip has been cancelled."
 		}
 		if t.CancelReason != "" {
@@ -60,6 +101,18 @@ func (a *API) notifyTripStatus(ctx context.Context, t *models.Trip) error {
 		return a.notifyTrip(ctx, t, "trip_cancelled", msg, "", "trip:"+t.ID+":cancelled", nil)
 	}
 	return nil
+}
+
+// tripLabel names a trip for a message: the outing's title for a special_trip, or
+// "Morning Pickup"/"Evening Drop" for the other two.
+func tripLabel(t *models.Trip) string {
+	if t.TripType == models.TripSpecial {
+		if t.Title != "" {
+			return t.Title
+		}
+		return "Special Trip"
+	}
+	return tripTypeNames[t.TripType]
 }
 
 // notifyStopEvents: Approaching (with ETA), Reached, Crossed for the parents at

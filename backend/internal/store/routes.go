@@ -10,12 +10,12 @@ import (
 )
 
 const routeCols = `r.id, r.school_id, r.name, r.code, r.start_point, r.description, r.supports_pickup,
-	r.supports_drop, r.status, (SELECT count(*) FROM stops s WHERE s.route_id = r.id), r.created_at, r.updated_at`
+	r.supports_drop, r.supports_outing, r.status, (SELECT count(*) FROM stops s WHERE s.route_id = r.id), r.created_at, r.updated_at`
 
 func scanRoute(row pgx.Row) (*models.Route, error) {
 	var r models.Route
 	err := row.Scan(&r.ID, &r.SchoolID, &r.Name, &r.Code, &r.StartPoint, &r.Description, &r.SupportsPickup,
-		&r.SupportsDrop, &r.Status, &r.StopCount, &r.CreatedAt, &r.UpdatedAt)
+		&r.SupportsDrop, &r.SupportsOuting, &r.Status, &r.StopCount, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -29,6 +29,7 @@ type RouteInput struct {
 	Description    string
 	SupportsPickup bool
 	SupportsDrop   bool
+	SupportsOuting bool
 }
 
 func ListRoutes(ctx context.Context, q DBTX, schoolID string, f ListFilter, p Page) ([]models.Route, int, error) {
@@ -63,9 +64,9 @@ func GetRoute(ctx context.Context, q DBTX, schoolID, id string) (*models.Route, 
 func CreateRoute(ctx context.Context, q DBTX, schoolID string, in RouteInput) (*models.Route, error) {
 	var id string
 	err := q.QueryRow(ctx, `
-		INSERT INTO routes (school_id, name, code, start_point, description, supports_pickup, supports_drop)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-		schoolID, in.Name, in.Code, in.StartPoint, in.Description, in.SupportsPickup, in.SupportsDrop).Scan(&id)
+		INSERT INTO routes (school_id, name, code, start_point, description, supports_pickup, supports_drop, supports_outing)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		schoolID, in.Name, in.Code, in.StartPoint, in.Description, in.SupportsPickup, in.SupportsDrop, in.SupportsOuting).Scan(&id)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -75,9 +76,9 @@ func CreateRoute(ctx context.Context, q DBTX, schoolID string, in RouteInput) (*
 func UpdateRoute(ctx context.Context, q DBTX, schoolID, id string, in RouteInput) (*models.Route, error) {
 	tag, err := q.Exec(ctx, `
 		UPDATE routes SET name = $3, code = $4, start_point = $5, description = $6,
-			supports_pickup = $7, supports_drop = $8
+			supports_pickup = $7, supports_drop = $8, supports_outing = $9
 		WHERE id = $1 AND school_id = $2`,
-		id, schoolID, in.Name, in.Code, in.StartPoint, in.Description, in.SupportsPickup, in.SupportsDrop)
+		id, schoolID, in.Name, in.Code, in.StartPoint, in.Description, in.SupportsPickup, in.SupportsDrop, in.SupportsOuting)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -100,12 +101,12 @@ func SetRouteStatus(ctx context.Context, q DBTX, schoolID, id, status string) (*
 
 // Stops
 
-const stopCols = `id, route_id, name, landmark, latitude, longitude, sequence,
+const stopCols = `id, route_id, name, landmark, latitude, longitude, sequence, drop_sequence,
 	to_char(pickup_time, 'HH24:MI'), to_char(drop_time, 'HH24:MI'), geofence_radius_m, created_at, updated_at`
 
 func scanStop(row pgx.Row) (*models.Stop, error) {
 	var s models.Stop
-	err := row.Scan(&s.ID, &s.RouteID, &s.Name, &s.Landmark, &s.Latitude, &s.Longitude, &s.Sequence,
+	err := row.Scan(&s.ID, &s.RouteID, &s.Name, &s.Landmark, &s.Latitude, &s.Longitude, &s.Sequence, &s.DropSequence,
 		&s.PickupTime, &s.DropTime, &s.GeofenceRadiusM, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, mapErr(err)
@@ -217,6 +218,35 @@ func ReorderStops(ctx context.Context, q DBTX, routeID string, stopIDs []string)
 	}
 	_, err = q.Exec(ctx, `
 		UPDATE stops s SET sequence = o.pos
+		FROM unnest($2::uuid[]) WITH ORDINALITY AS o(id, pos)
+		WHERE s.id = o.id AND s.route_id = $1`, routeID, stopIDs)
+	return err
+}
+
+// ErrDropOrderMismatch: the list must contain exactly the route's stops that have a
+// drop_time set (the stops that actually run in the Evening Drop leg), each once.
+var ErrDropOrderMismatch = fmt.Errorf("stop list does not match the route's evening-drop stops")
+
+// ReorderDropSequence sets drop_sequence = position in stopIDs, independently of the
+// Morning Pickup sequence. Run after LockRoute. stopIDs must be exactly the stops on
+// the route with a non-null drop_time (not necessarily all of the route's stops).
+func ReorderDropSequence(ctx context.Context, q DBTX, routeID string, stopIDs []string) error {
+	var matched int
+	err := q.QueryRow(ctx, `
+		SELECT count(*) FROM stops WHERE route_id = $1 AND id = ANY($2::uuid[]) AND drop_time IS NOT NULL`,
+		routeID, stopIDs).Scan(&matched)
+	if err != nil {
+		return err
+	}
+	var total int
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM stops WHERE route_id = $1 AND drop_time IS NOT NULL`, routeID).Scan(&total); err != nil {
+		return err
+	}
+	if matched != len(stopIDs) || matched != total {
+		return ErrDropOrderMismatch
+	}
+	_, err = q.Exec(ctx, `
+		UPDATE stops s SET drop_sequence = o.pos
 		FROM unnest($2::uuid[]) WITH ORDINALITY AS o(id, pos)
 		WHERE s.id = o.id AND s.route_id = $1`, routeID, stopIDs)
 	return err

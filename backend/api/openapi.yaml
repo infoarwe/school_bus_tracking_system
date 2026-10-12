@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.10.2
+  version: 0.12.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -131,6 +131,8 @@ info:
     | `not_found` | 404 | Missing or belongs to another school. |
     | `conflict` | 409 | Duplicate; see `fields`. |
     | `otp_too_soon`, `otp_rate_limited` | 429 | Wait before requesting another code. |
+    | `route_taken`, `bus_taken`, `already_assigned` | 409 | Route self-assignment conflict: reload the route list. |
+    | `assigned_by_school` | 409 | The school assigned this trip; only the school can change it. |
     | `rate_limited` | 429 | Too many requests: wait `Retry-After` seconds, then retry (see Rate limits). |
     | `invalid_upload` | 400 | A file upload was not `multipart/form-data`. |
     | `invalid_transition`, `not_trip_day`, `another_trip_in_progress`, `status_changed` | 409 | Trip action not allowed now; refresh the trip. |
@@ -138,7 +140,29 @@ info:
     | `trip_not_started` | 409 | Stop sending GPS: the trip is not in progress. |
     | `live_unavailable` | 503 | Keep GPS points queued and retry. |
 
+    ## Driver self-assignment (Driver app)
+    Drivers choose their own routes; the school does not have to assign every trip.
+    1. Choose Morning Pickup or Evening Drop and a date (today … 6 days ahead): `GET /driver/route-slots?date=&trip_type=`.
+    2. Show the routes (code, name, stops with times, student count) with `availability`: Available / Taken / Mine.
+    3. "Take this route": pick a bus from `buses` where `available` is true, confirm, then
+       `POST /driver/route-slots/claim`. The trip comes back `confirmed`: next action is Start on the day.
+    4. On `409 route_taken` or `bus_taken`, show the message and reload the list (someone was faster).
+    5. A driver can give back a route they took, before starting: `POST /driver/trips/{id}/release`.
+
+    Existing endpoints are unchanged: claimed trips appear in `GET /driver/trips` like any trip, with
+    `assigned_by: "driver"`. Trips the school assigned (`assigned_by: "staff"`) still need Confirm and cannot be
+    released by the driver.
+
     ## Changelog
+    - 0.12.0 (Sprint 10): flexible route/trip types, additive. Routes gain `supports_outing` (a third, optional
+      "Used for" flag). Stops gain `drop_sequence` (Evening Drop's own travel order, independent of `sequence`;
+      `PUT /routes/{id}/stops/drop-order`). `trip_type` gains `special_trip`: `route_id` becomes optional
+      (null for a routeless outing), `Trip`/`TripInput` gain `title`, `notify_parents` and (create/update only)
+      `waypoints[]` (the outing's own ad-hoc destinations — never touches the permanent `stops` table). Existing
+      morning_pickup/evening_drop trips, routes and stops are unaffected.
+    - 0.11.0: **mobile handoff 8**: driver self-assignment (`GET /driver/route-slots`, `POST /driver/route-slots/claim`,
+      `POST /driver/trips/{id}/release`); `assigned_by` on trips (additive). Admin web: staff inbox
+      (`GET /staff/notifications`, `POST /staff/notifications/read`) and the `staff_notification` WebSocket event.
     - 0.10.2 (S9-04): new web passwords are limited to 72 bytes (`400 validation_failed`, was a 500); ending a session is
       audited. Admin web only; no mobile-facing change.
     - 0.10.1 (S9-01): rate limits (see Rate limits): new `429 rate_limited` error with a `Retry-After` header on any
@@ -1089,6 +1113,37 @@ paths:
                   data: { type: array, items: { $ref: "#/components/schemas/Stop" } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
 
+  /api/v1/schools/{schoolID}/routes/{routeID}/stops/drop-order:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+    put:
+      tags: [Routes & stops]
+      summary: Reorder the Evening Drop stops
+      description: >
+        Send every stop ID of the route that has a drop_time set, once each, in the new
+        Evening Drop travel order. Independent of the Morning Pickup order (stop order).
+      operationId: reorderDropSequence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [drop_stop_ids]
+              properties:
+                drop_stop_ids: { type: array, items: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Stops in the new order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Stop" } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
   /api/v1/schools/{schoolID}/routes/{routeID}/stops/{stopID}:
     parameters:
       - { $ref: "#/components/parameters/SchoolID" }
@@ -1706,7 +1761,7 @@ paths:
         - { name: date, in: query, schema: { type: string, format: date } }
         - { name: from, in: query, description: Range start (when date is not given), schema: { type: string, format: date } }
         - { name: to, in: query, description: Range end, schema: { type: string, format: date } }
-        - { name: trip_type, in: query, schema: { type: string, enum: [morning_pickup, evening_drop] } }
+        - { name: trip_type, in: query, schema: { type: string, enum: [morning_pickup, evening_drop, special_trip] } }
         - { name: status, in: query, schema: { type: string, enum: [scheduled, confirmed, started, completed, cancelled] } }
         - { name: route_id, in: query, schema: { type: string, format: uuid } }
         - { name: driver_id, in: query, schema: { type: string, format: uuid } }
@@ -1761,7 +1816,7 @@ paths:
               properties:
                 from_date: { type: string, format: date }
                 to_dates: { type: array, minItems: 1, maxItems: 31, items: { type: string, format: date } }
-                trip_types: { type: array, items: { type: string, enum: [morning_pickup, evening_drop] }, description: Default both. }
+                trip_types: { type: array, items: { type: string, enum: [morning_pickup, evening_drop, special_trip] }, description: Default all three. }
       responses:
         "200":
           description: Result.
@@ -1904,7 +1959,12 @@ paths:
             schema:
               type: object
               properties:
-                browser_key: { type: string, description: Empty to use OpenStreetMap. }
+                browser_key:
+                  type: string
+                  description: >
+                    Empty leaves maps and place search unavailable for this school (Google Maps
+                    is the only provider; the admin web shows a configuration message, not a
+                    fallback map).
                 server_key: { type: [string, "null"] }
       responses:
         "200":
@@ -2198,6 +2258,173 @@ paths:
         "400": { $ref: "#/components/responses/ValidationFailed" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/driver/route-slots:
+    get:
+      tags: [Driver app]
+      summary: Routes the driver can take for a date and trip type
+      description: |
+        Self-assignment, step 1. Lists the school's active routes that run the trip type and have stops, each with
+        `availability` (`available`, `taken` by another driver, or `mine`), its ordered stops with the time for this
+        trip type, and the number of students (a count only). `buses` lists the school's active buses; `available:
+        false` means another trip uses it at that time. `my_trip` is the caller's trip in this slot, if any.
+        Dates from `today` to `last_date` (school time zone, 7 days) can be claimed.
+      operationId: getDriverRouteSlots
+      parameters:
+        - { name: date, in: query, schema: { type: string, format: date }, description: "YYYY-MM-DD, default today." }
+        - { name: trip_type, in: query, schema: { type: string, enum: [morning_pickup, evening_drop], default: morning_pickup } }
+      responses:
+        "200":
+          description: Routes and buses for the slot.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/RouteSlots" } } }
+              example:
+                data:
+                  trip_date: "2026-10-12"
+                  trip_type: morning_pickup
+                  today: "2026-10-12"
+                  last_date: "2026-10-18"
+                  my_trip: null
+                  routes:
+                    - route: { id: 5e000000-0000-4000-8000-000000000040, code: RS-01, name: Gandhipuram - Singanallur, start_point: School, stop_count: 4 }
+                      student_count: 18
+                      availability: available
+                      stops:
+                        - { sequence: 1, name: Gandhipuram, landmark: Near bus stand, time: "07:10" }
+                        - { sequence: 2, name: Peelamedu, landmark: "", time: "07:20" }
+                  buses:
+                    - { id: 6b000000-0000-4000-8000-000000000050, vehicle_number: TN-38-AB-1234, capacity: 40, available: true }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/driver/route-slots/claim:
+    post:
+      tags: [Driver app]
+      summary: Take a route (and a bus) for a date and trip type
+      description: |
+        Self-assignment, step 2 ("Take this route"). Creates the trip already **confirmed** for the caller; no
+        approval is needed. The school's admins are notified. The server re-checks everything: the route must be
+        active, run the trip type and have stops; the bus must be active and free at that time; the date must be
+        within the claim window.
+
+        Sending the same request again returns the same trip with `200` (safe to retry after a timeout).
+        Conflicts (`409`): `route_taken` (another driver was faster: refresh the list), `bus_taken` (choose another
+        bus), `already_assigned` (you already have a route for this date and trip type: release it first).
+      operationId: claimDriverRoute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trip_date, trip_type, route_id, bus_id]
+              properties:
+                trip_date: { type: string, format: date }
+                trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+                route_id: { type: string, format: uuid }
+                bus_id: { type: string, format: uuid }
+            example: { trip_date: "2026-10-12", trip_type: morning_pickup, route_id: 5e000000-0000-4000-8000-000000000040, bus_id: 6b000000-0000-4000-8000-000000000050 }
+      responses:
+        "201":
+          description: Taken; the trip (status `confirmed`, `assigned_by` = `driver`) with its stops.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverTrip" } } }
+        "200":
+          description: The same request was already done; the existing trip.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverTrip" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "`route_taken`, `bus_taken` or `already_assigned`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: { code: route_taken, message: Another driver has just taken this route. Choose another route., fields: { route_id: already taken } } }
+
+  /api/v1/driver/trips/{tripID}/release:
+    parameters:
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Driver app]
+      summary: Give back a route the driver took
+      description: |
+        Only for trips the driver took themselves (`assigned_by` = `driver`), before starting them and not for a
+        past date. The trip is cancelled (its history is kept) and the route becomes available again; the school's
+        admins are notified. Trips assigned by the school answer `409 assigned_by_school`.
+      operationId: releaseDriverTrip
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 300 }
+      responses:
+        "200":
+          description: Released; the trip with status `cancelled`.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverTrip" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`assigned_by_school` or `invalid_transition` (already started, ended, cancelled or past)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/staff/notifications:
+    get:
+      tags: [Notifications]
+      summary: The caller's staff inbox (admin web)
+      description: |
+        Route claims and releases by drivers (`type` = `route_claimed` / `route_released`), newest first, for School
+        Admins and Transport Managers. `data` holds `trip_id`, `route_id`, `route_code`, `driver_name`, `bus_number`,
+        `trip_date`, `trip_type` and `at`. `meta.unread` is the unread count. Staff subscribed to the `school`
+        WebSocket channel also receive `{"type":"staff_notification","notification":{…}}` when one arrives.
+      operationId: getStaffNotifications
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+      responses:
+        "200":
+          description: Inbox items.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/InboxItem" } }
+                  meta:
+                    type: object
+                    properties:
+                      page: { type: integer }
+                      page_size: { type: integer }
+                      total: { type: integer }
+                      unread: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/staff/notifications/read:
+    post:
+      tags: [Notifications]
+      summary: Mark staff inbox items read
+      operationId: markStaffNotificationsRead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { type: string, format: uuid }, minItems: 1, maxItems: 200 }
+      responses:
+        "204": { description: Marked read (other users' items are ignored). }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
 
   /api/v1/driver/trips/{tripID}/emergency:
     parameters:
@@ -2574,7 +2801,9 @@ paths:
     get:
       tags: [Dashboard & reports]
       summary: School overview for today
-      description: Totals, today's trips by type and status, live and offline buses, delays, emergencies, per-route summary.
+      description: >
+        Totals, today's trips by type and status, live and offline buses, delays, emergencies,
+        per-route summary, and today's Special Trips/Outings (listed separately from routes).
       operationId: getDashboard
       responses:
         "200":
@@ -2739,6 +2968,53 @@ components:
     PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
 
   schemas:
+    RouteSlots:
+      type: object
+      required: [trip_date, trip_type, today, last_date, my_trip, routes, buses]
+      properties:
+        trip_date: { type: string, format: date }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        today: { type: string, format: date, description: Today in the school's time zone. }
+        last_date: { type: string, format: date, description: Last date a driver may claim. }
+        my_trip:
+          description: The caller's trip for this date and trip type, or null.
+          oneOf:
+            - { $ref: "#/components/schemas/DriverTrip" }
+            - { type: "null" }
+        routes:
+          type: array
+          items:
+            type: object
+            required: [route, student_count, availability, stops]
+            properties:
+              route:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  code: { type: string }
+                  name: { type: string }
+                  start_point: { type: string }
+                  stop_count: { type: integer }
+              student_count: { type: integer, description: Students with a stop for this trip type (count only). }
+              availability: { type: string, enum: [available, taken, mine] }
+              stops:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    sequence: { type: integer }
+                    name: { type: string }
+                    landmark: { type: string }
+                    time: { type: [string, "null"], description: "HH:MM: pickup time (Morning Pickup) or drop time (Evening Drop)." }
+        buses:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              vehicle_number: { type: string }
+              capacity: { type: integer }
+              available: { type: boolean, description: "false: another trip uses this bus at that time." }
     Branding:
       type: object
       required: [school_id, school_name, app_name, display_name, primary_color, secondary_color, logo_url, updated_at]
@@ -2864,7 +3140,7 @@ components:
       type: object
       properties:
         trip_id: { type: string, format: uuid }
-        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
         stops: { type: array, items: { $ref: "#/components/schemas/StopProgress" }, description: In travel order. }
         speed_mps: { type: number, description: Smoothed recent speed. }
         eta_source: { type: string, enum: [google, estimate] }
@@ -2935,8 +3211,8 @@ components:
       properties:
         trip_id: { type: string, format: uuid }
         school_id: { type: string, format: uuid }
-        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
-        route_id: { type: string, format: uuid }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
+        route_id: { type: string, description: "\"\" for a routeless Special Trip/Outing." }
         route_code: { type: string }
         bus_number: { type: string }
         driver_name: { type: string }
@@ -2974,16 +3250,45 @@ components:
         school_latitude: { type: [number, "null"], description: "The school's location: Morning Pickup destination (School Reached)." }
         school_longitude: { type: [number, "null"] }
         default_geofence_m: { type: integer, minimum: 25, maximum: 1000, default: 100, description: Arrival radius for new stops. }
+    TripWaypointInput:
+      type: object
+      required: [name, latitude, longitude]
+      properties:
+        name: { type: string, example: Science Museum }
+        landmark: { type: string }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        geofence_radius_m: { type: integer, minimum: 25, maximum: 1000, default: 100 }
     TripInput:
       type: object
-      required: [trip_date, trip_type, route_id, bus_id, driver_id]
+      required: [trip_date, trip_type, bus_id, driver_id]
+      description: >
+        route_id is required for morning_pickup/evening_drop. For special_trip it is
+        optional: a template route (one with supports_outing) may be given, or it may
+        be omitted for a fully ad-hoc outing — in which case title and at least one
+        waypoint are required instead.
       properties:
         trip_date: { type: string, format: date, example: "2026-10-07" }
-        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
-        route_id: { type: string, format: uuid }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
+        route_id: { type: [string, "null"], format: uuid }
         bus_id: { type: string, format: uuid }
         driver_id: { type: string, format: uuid }
         notes: { type: string, maxLength: 500 }
+        title: { type: string, maxLength: 200, description: "Special Trip/Outing name, shown instead of a route name. Required when special_trip has no route_id." }
+        notify_parents:
+          type: boolean
+          default: true
+          description: >
+            special_trip only: whether to notify the template route's usual parents.
+            Ignored (always notifies) for the other two trip types. A routeless
+            special_trip never notifies regardless of this flag (it has no riders).
+            Never affects whether staff can view or track the trip.
+        waypoints:
+          type: array
+          items: { $ref: "#/components/schemas/TripWaypointInput" }
+          minItems: 1
+          maxItems: 20
+          description: special_trip without route_id only; the ad-hoc destinations in travel order (always bracketed by School on both ends).
     Trip:
       type: object
       required: [id, school_id, trip_date, trip_type, status, route, bus, driver, student_count]
@@ -2991,10 +3296,11 @@ components:
         id: { type: string, format: uuid }
         school_id: { type: string, format: uuid }
         trip_date: { type: string, format: date, description: In the school's time zone. }
-        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
         status: { type: string, enum: [scheduled, confirmed, started, completed, cancelled] }
         route:
-          type: object
+          type: [object, "null"]
+          description: Null for a routeless Special Trip/Outing; title is shown instead.
           properties:
             id: { type: string, format: uuid }
             code: { type: string }
@@ -3012,7 +3318,9 @@ components:
             id: { type: string, format: uuid }
             name: { type: string }
             mobile: { type: string }
-        student_count: { type: integer, description: Students on the route with a stop for this trip type. }
+        student_count: { type: integer, description: Students on the route with a stop for this trip type (0 for special_trip). }
+        title: { type: string, description: Special Trip/Outing name; "" for route-based trips. }
+        notify_parents: { type: boolean, description: special_trip only; see TripInput. }
         notes: { type: string }
         cancel_reason: { type: string }
         confirmed_at: { type: [string, "null"], format: date-time }
@@ -3021,6 +3329,10 @@ components:
         cancelled_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        assigned_by:
+          type: string
+          enum: [driver, staff]
+          description: "driver: the driver took this route in the Driver app (self-assignment); staff: school staff assigned it."
     TripStop:
       allOf:
         - $ref: "#/components/schemas/Stop"
@@ -3259,6 +3571,7 @@ components:
         description: { type: string }
         supports_pickup: { type: boolean, default: true, description: Used for Morning Pickup trips. }
         supports_drop: { type: boolean, default: true, description: Used for Evening Drop trips. }
+        supports_outing: { type: boolean, default: false, description: Eligible as a Special Trip/Outing's template route. }
     Route:
       allOf:
         - $ref: "#/components/schemas/RouteInput"
@@ -3302,7 +3615,11 @@ components:
           properties:
             id: { type: string, format: uuid }
             route_id: { type: string, format: uuid }
-            sequence: { type: integer, minimum: 1, description: "Travel order, 1..N without gaps." }
+            sequence: { type: integer, minimum: 1, description: "Morning Pickup travel order, 1..N without gaps." }
+            drop_sequence:
+              type: [integer, "null"]
+              minimum: 1
+              description: Evening Drop travel order, independent of sequence; null if this stop is not part of the evening leg.
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
     Role:

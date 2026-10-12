@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react'
 import { Flex, Input, Segmented, Select, Table, Tag, Typography } from 'antd'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import { useAuth } from '../context/AuthContext'
 import { useCurrentSchool } from '../context/SchoolContext'
@@ -102,6 +103,7 @@ export default function AuditLogsPage() {
         rowKey="id"
         size="small"
         loading={list.loading}
+        locale={{ emptyText: <ListEmpty list={list} empty="No audit entries yet." /> }}
         dataSource={list.rows}
         pagination={list.pagination}
         scroll={{ x: 1000 }}

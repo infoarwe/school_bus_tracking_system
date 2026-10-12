@@ -17,6 +17,7 @@ import {
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import StatusTag from '../components/StatusTag'
 import { useCurrentSchool } from '../context/SchoolContext'
@@ -96,6 +97,7 @@ export default function SchoolsPage() {
       <Table<School>
         rowKey="id"
         loading={list.loading}
+        locale={{ emptyText: <ListEmpty list={list} empty="No schools yet." /> }}
         dataSource={list.rows}
         scroll={{ x: 800 }}
         pagination={list.pagination}

@@ -100,7 +100,7 @@ function ReportDelay({ schoolId, onClose }: { schoolId: string; onClose: () => v
           <Select
             options={trips.map((t) => ({
               value: t.id,
-              label: `${t.route.code} · ${tripTypeLabels[t.trip_type]} · ${t.bus.vehicle_number} (${t.status})`,
+              label: `${t.route?.code ?? t.title} · ${tripTypeLabels[t.trip_type]} · ${t.bus.vehicle_number} (${t.status})`,
             }))}
             notFoundContent="No open trips today"
           />

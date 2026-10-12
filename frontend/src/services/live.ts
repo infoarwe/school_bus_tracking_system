@@ -34,6 +34,11 @@ export type LiveMessage =
   | { type: 'progress'; trip_id: string; progress: TripProgress }
   | { type: 'alert'; trip_id: string; alert: Alert }
   | {
+      type: 'staff_notification'
+      trip_id: string
+      notification: { type: string; title: string; body: string }
+    }
+  | {
       type: 'stop_status'
       trip_id: string
       stop: { stop_id: string; type: string; missed: boolean; at: string }

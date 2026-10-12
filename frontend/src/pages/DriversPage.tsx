@@ -1,7 +1,9 @@
 import { useCallback, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { App, Button, Col, Dropdown, Flex, Form, Input, Modal, Row, Space, Table, Tag } from 'antd'
 import { DownOutlined, PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StatusTag from '../components/StatusTag'
@@ -20,7 +22,15 @@ function Drivers({ schoolId }: { schoolId: string }) {
   const { message, modal } = App.useApp()
   const fetcher = useCallback((p: ListParams) => driversApi.list(schoolId, p), [schoolId])
   const list = useServerList(fetcher)
-  const [editing, setEditing] = useState<Driver | 'new' | null>(null)
+  // ?new=1 (dashboard quick action) opens the form straight away.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [editing, setEditing] = useState<Driver | 'new' | null>(() =>
+    searchParams.get('new') === '1' ? 'new' : null,
+  )
+  const closeForm = () => {
+    setEditing(null)
+    if (searchParams.has('new')) setSearchParams({}, { replace: true })
+  }
 
   function changeStatus(d: Driver, status: DriverStatus) {
     const apply = async () => {
@@ -63,6 +73,14 @@ function Drivers({ schoolId }: { schoolId: string }) {
       <Table<Driver>
         rowKey="id"
         loading={list.loading}
+        locale={{
+          emptyText: (
+            <ListEmpty
+              list={list}
+              empty="No drivers yet. Add drivers so they can log in to the Driver app."
+            />
+          ),
+        }}
         dataSource={list.rows}
         pagination={list.pagination}
         scroll={{ x: 900 }}
@@ -122,9 +140,9 @@ function Drivers({ schoolId }: { schoolId: string }) {
         <DriverForm
           schoolId={schoolId}
           driver={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
+          onClose={closeForm}
           onSaved={() => {
-            setEditing(null)
+            closeForm()
             list.reload()
           }}
         />

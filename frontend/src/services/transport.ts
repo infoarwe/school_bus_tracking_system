@@ -57,4 +57,7 @@ export const routesApi = {
     send<void>('delete', `${route(schoolId, routeId)}/stops/${stopId}`),
   reorderStops: (schoolId: string, routeId: string, stopIds: string[]) =>
     send<Stop[]>('put', `${route(schoolId, routeId)}/stops/order`, { stop_ids: stopIds }),
+  /** Evening Drop's own travel order, independent of reorderStops (Morning Pickup). */
+  reorderDropSequence: (schoolId: string, routeId: string, dropStopIds: string[]) =>
+    send<Stop[]>('put', `${route(schoolId, routeId)}/stops/drop-order`, { drop_stop_ids: dropStopIds }),
 }

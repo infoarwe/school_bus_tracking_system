@@ -14,6 +14,7 @@ import {
   Typography,
 } from 'antd'
 import { NotificationOutlined } from '@ant-design/icons'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import { useAuth } from '../context/AuthContext'
@@ -82,6 +83,7 @@ function Announcements({ schoolId }: { schoolId: string }) {
       <Table<Announcement>
         rowKey="id"
         loading={list.loading}
+        locale={{ emptyText: <ListEmpty list={list} empty="No announcements yet." /> }}
         dataSource={list.rows}
         pagination={list.pagination}
         scroll={{ x: 1000 }}

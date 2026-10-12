@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -10,7 +11,11 @@ import (
 )
 
 // student_count: students on the route who have a stop for this trip type
-// (pickup stop for Morning Pickup, drop stop for Evening Drop).
+// (pickup stop for Morning Pickup, drop stop for Evening Drop/Special Trip). A
+// routeless Special Trip/Outing has no route, so this is simply 0 for it (the
+// subquery's WHERE sa.route_id = t.route_id never matches a NULL route_id).
+// routes is a LEFT JOIN: a Special Trip/Outing may have no route (ad-hoc waypoints
+// instead), so every r.* column below is nullable.
 const tripSelect = `SELECT t.id, t.school_id, t.trip_date::text, t.trip_type, t.status,
 	r.id, r.code, r.name, (SELECT count(*) FROM stops s WHERE s.route_id = r.id),
 	b.id, b.vehicle_number, b.capacity,
@@ -18,23 +23,30 @@ const tripSelect = `SELECT t.id, t.school_id, t.trip_date::text, t.trip_type, t.
 	(SELECT count(*) FROM student_assignments sa JOIN students st ON st.id = sa.student_id
 		WHERE sa.route_id = t.route_id AND sa.ended_at IS NULL AND st.status = 'active'
 		AND CASE WHEN t.trip_type = 'morning_pickup' THEN sa.pickup_stop_id ELSE sa.drop_stop_id END IS NOT NULL),
-	t.notes, t.cancel_reason, t.confirmed_at, t.started_at, t.ended_at, t.cancelled_at, t.created_at, t.updated_at
+	t.title, t.notify_parents, t.notes, t.cancel_reason, t.confirmed_at, t.started_at, t.ended_at, t.cancelled_at,
+	t.created_at, t.updated_at,
+	CASE WHEN t.created_by = d.user_id THEN 'driver' ELSE 'staff' END
 	FROM trips t
-	JOIN routes r ON r.id = t.route_id
+	LEFT JOIN routes r ON r.id = t.route_id
 	JOIN buses b ON b.id = t.bus_id
 	JOIN drivers d ON d.id = t.driver_id
 	JOIN users du ON du.id = d.user_id`
 
 func scanTrip(row pgx.Row) (*models.Trip, error) {
 	var t models.Trip
+	var routeID, routeCode, routeName sql.NullString
+	var routeStopCount sql.NullInt32
 	err := row.Scan(&t.ID, &t.SchoolID, &t.TripDate, &t.TripType, &t.Status,
-		&t.Route.ID, &t.Route.Code, &t.Route.Name, &t.Route.StopCount,
+		&routeID, &routeCode, &routeName, &routeStopCount,
 		&t.Bus.ID, &t.Bus.VehicleNumber, &t.Bus.Capacity,
 		&t.Driver.ID, &t.Driver.Name, &t.Driver.Mobile,
-		&t.StudentCount, &t.Notes, &t.CancelReason,
-		&t.ConfirmedAt, &t.StartedAt, &t.EndedAt, &t.CancelledAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.StudentCount, &t.Title, &t.NotifyParents, &t.Notes, &t.CancelReason,
+		&t.ConfirmedAt, &t.StartedAt, &t.EndedAt, &t.CancelledAt, &t.CreatedAt, &t.UpdatedAt, &t.AssignedBy)
 	if err != nil {
 		return nil, mapErr(err)
+	}
+	if routeID.Valid {
+		t.Route = &models.TripRoute{ID: routeID.String, Code: routeCode.String, Name: routeName.String, StopCount: int(routeStopCount.Int32)}
 	}
 	return &t, nil
 }
@@ -126,27 +138,31 @@ func RouteTripsOn(ctx context.Context, q DBTX, routeID, date string) ([]models.T
 type TripInput struct {
 	TripDate string
 	TripType string
-	RouteID  string
-	BusID    string
-	DriverID string
-	Notes    string
+	// RouteID is nil for a routeless Special Trip/Outing; required for the other two types.
+	RouteID       *string
+	BusID         string
+	DriverID      string
+	Notes         string
+	Title         string // Special Trip/Outing name; ignored for the other two types
+	NotifyParents bool
 }
 
 func CreateTrip(ctx context.Context, q DBTX, schoolID, createdBy string, in TripInput) (string, error) {
 	var id string
 	err := q.QueryRow(ctx, `
-		INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id, notes, created_by)
-		VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8) RETURNING id`,
-		schoolID, in.TripDate, in.TripType, in.RouteID, in.BusID, in.DriverID, in.Notes, createdBy).Scan(&id)
+		INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id, notes, title, notify_parents, created_by)
+		VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+		schoolID, in.TripDate, in.TripType, in.RouteID, in.BusID, in.DriverID, in.Notes, in.Title, in.NotifyParents, createdBy).Scan(&id)
 	return id, mapErr(err)
 }
 
-// UpdateTripAssignment changes route/bus/driver/notes; status is changed separately.
+// UpdateTripAssignment changes route/bus/driver/notes/title/notify_parents; status is changed separately.
 func UpdateTripAssignment(ctx context.Context, q DBTX, schoolID, id string, in TripInput) error {
 	tag, err := q.Exec(ctx, `
-		UPDATE trips SET trip_date = $3::date, trip_type = $4, route_id = $5, bus_id = $6, driver_id = $7, notes = $8
+		UPDATE trips SET trip_date = $3::date, trip_type = $4, route_id = $5, bus_id = $6, driver_id = $7,
+			notes = $8, title = $9, notify_parents = $10
 		WHERE id = $1 AND school_id = $2`,
-		id, schoolID, in.TripDate, in.TripType, in.RouteID, in.BusID, in.DriverID, in.Notes)
+		id, schoolID, in.TripDate, in.TripType, in.RouteID, in.BusID, in.DriverID, in.Notes, in.Title, in.NotifyParents)
 	if err != nil {
 		return mapErr(err)
 	}
@@ -245,20 +261,32 @@ type TripRefs struct {
 	RouteFound, BusFound, DriverFound    bool
 	RouteStatus, BusStatus, DriverStatus string
 	SupportsPickup, SupportsDrop         bool
+	SupportsOuting                       bool
 	StopCount                            int
+	// DropSequenceComplete: every stop on the route with a drop_time has a
+	// drop_sequence set (the route's evening order is fully configured). Only
+	// meaningful (and only computed) when a route was given.
+	DropSequenceComplete bool
 }
 
-func GetTripRefs(ctx context.Context, q DBTX, schoolID, routeID, busID, driverID string) (*TripRefs, error) {
+// GetTripRefs looks up the chosen bus and driver, and the route when routeID is
+// non-nil (a routeless Special Trip/Outing has no route to check).
+func GetTripRefs(ctx context.Context, q DBTX, schoolID string, routeID *string, busID, driverID string) (*TripRefs, error) {
 	var t TripRefs
-	err := q.QueryRow(ctx, `SELECT status, supports_pickup, supports_drop,
-		(SELECT count(*) FROM stops WHERE route_id = routes.id) FROM routes WHERE id = $1 AND school_id = $2`,
-		routeID, schoolID).Scan(&t.RouteStatus, &t.SupportsPickup, &t.SupportsDrop, &t.StopCount)
-	if err == nil {
-		t.RouteFound = true
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, err
+	if routeID != nil {
+		err := q.QueryRow(ctx, `SELECT status, supports_pickup, supports_drop, supports_outing,
+			(SELECT count(*) FROM stops WHERE route_id = routes.id),
+			NOT EXISTS (SELECT 1 FROM stops WHERE route_id = routes.id AND drop_time IS NOT NULL AND drop_sequence IS NULL)
+			FROM routes WHERE id = $1 AND school_id = $2`,
+			*routeID, schoolID).Scan(&t.RouteStatus, &t.SupportsPickup, &t.SupportsDrop, &t.SupportsOuting,
+			&t.StopCount, &t.DropSequenceComplete)
+		if err == nil {
+			t.RouteFound = true
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
 	}
-	err = q.QueryRow(ctx, `SELECT status FROM buses WHERE id = $1 AND school_id = $2`, busID, schoolID).Scan(&t.BusStatus)
+	err := q.QueryRow(ctx, `SELECT status FROM buses WHERE id = $1 AND school_id = $2`, busID, schoolID).Scan(&t.BusStatus)
 	if err == nil {
 		t.BusFound = true
 	} else if !errors.Is(err, pgx.ErrNoRows) {

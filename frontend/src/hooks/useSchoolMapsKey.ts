@@ -12,7 +12,8 @@ export function setCachedMapsKey(schoolId: string, key: string) {
 
 /**
  * The current school's Google Maps browser key: undefined while loading, '' when the
- * school has none (callers fall back to OpenStreetMap).
+ * school has none (callers show a clear configuration message — see MapsConfigError;
+ * Google Maps is the only map provider, there is no other-provider fallback).
  */
 export function useSchoolMapsKey(): string | undefined {
   const { schoolId } = useCurrentSchool()
@@ -24,7 +25,7 @@ export function useSchoolMapsKey(): string | undefined {
     settingsApi
       .getMaps(schoolId)
       .then((m) => m.browser_key)
-      .catch(() => '') // no key readable: use OpenStreetMap
+      .catch(() => '') // key not readable: treat as unconfigured
       .then((key) => {
         cache.set(schoolId, key)
         if (!cancelled) setLoaded({ schoolId, key })

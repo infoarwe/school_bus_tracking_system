@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   App,
   Button,
@@ -22,7 +22,9 @@ import {
 } from 'antd'
 import { PlusOutlined, UploadOutlined } from '@ant-design/icons'
 import AssignRouteModal from '../components/AssignRouteModal'
+import StudentRegisterForm from '../components/StudentRegisterForm'
 import ListToolbar from '../components/ListToolbar'
+import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StatusTag from '../components/StatusTag'
@@ -58,7 +60,15 @@ function Students({ schoolId }: { schoolId: string }) {
   const list = useServerList(fetcher)
   const [classes, setClasses] = useState<string[]>([])
   const [routes, setRoutes] = useState<BusRoute[]>([])
-  const [editing, setEditing] = useState<Student | 'new' | null>(null)
+  // ?new=1 (dashboard quick action) opens the form straight away.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [editing, setEditing] = useState<Student | 'new' | null>(() =>
+    searchParams.get('new') === '1' && canEdit ? 'new' : null,
+  )
+  const closeForm = () => {
+    setEditing(null)
+    if (searchParams.has('new')) setSearchParams({}, { replace: true })
+  }
   const [assigning, setAssigning] = useState<Student | null>(null)
   const [viewing, setViewing] = useState<string | null>(null)
 
@@ -141,6 +151,11 @@ function Students({ schoolId }: { schoolId: string }) {
       <Table<Student>
         rowKey="id"
         loading={list.loading}
+        locale={{
+          emptyText: (
+            <ListEmpty list={list} empty="No students yet. Add a student or import a CSV file." />
+          ),
+        }}
         dataSource={list.rows}
         pagination={list.pagination}
         scroll={{ x: 1100 }}
@@ -213,15 +228,24 @@ function Students({ schoolId }: { schoolId: string }) {
         ]}
       />
 
-      {editing && (
+      {editing === 'new' && (
+        <StudentRegisterForm
+          schoolId={schoolId}
+          onClose={closeForm}
+          onSaved={() => {
+            closeForm()
+            list.reload()
+          }}
+        />
+      )}
+      {editing && editing !== 'new' && (
         <StudentForm
           schoolId={schoolId}
-          student={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
-          onSaved={(saved, isNew) => {
-            setEditing(null)
+          student={editing}
+          onClose={closeForm}
+          onSaved={() => {
+            closeForm()
             list.reload()
-            if (isNew && saved.transport_status === 'uses_transport') setAssigning(saved)
           }}
         />
       )}

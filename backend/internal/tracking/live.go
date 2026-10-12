@@ -56,27 +56,29 @@ func (l *BusLocation) Point() Point {
 
 // Event types sent to WebSocket subscribers.
 const (
-	EventLocation   = "location"
-	EventTripStatus = "trip_status"
-	EventBusStale   = "bus_stale"
-	EventStopStatus = "stop_status" // a stop became approaching / reached / crossed
-	EventProgress   = "progress"    // every stop's status and ETA, after each location
-	EventAlert      = "alert"       // delay / emergency, staff only
+	EventLocation          = "location"
+	EventTripStatus        = "trip_status"
+	EventBusStale          = "bus_stale"
+	EventStopStatus        = "stop_status"        // a stop became approaching / reached / crossed
+	EventProgress          = "progress"           // every stop's status and ETA, after each location
+	EventAlert             = "alert"              // delay / emergency, staff only
+	EventStaffNotification = "staff_notification" // staff inbox item (route claimed/released), staff only
 )
 
 // AudienceStaff marks events only school staff (school-channel subscribers) may receive.
 const AudienceStaff = "staff"
 
 type Event struct {
-	Type     string        `json:"type"`
-	SchoolID string        `json:"school_id"`
-	TripID   string        `json:"trip_id"`
-	Location *BusLocation  `json:"location,omitempty"`
-	Status   string        `json:"status,omitempty"` // trip_status
-	Stop     *StopEvent    `json:"stop,omitempty"`   // stop_status
-	Progress *TripProgress `json:"progress,omitempty"`
-	Alert    any           `json:"alert,omitempty"`
-	Audience string        `json:"audience,omitempty"` // "staff": never sent to parents or drivers
+	Type         string        `json:"type"`
+	SchoolID     string        `json:"school_id"`
+	TripID       string        `json:"trip_id"`
+	Location     *BusLocation  `json:"location,omitempty"`
+	Status       string        `json:"status,omitempty"` // trip_status
+	Stop         *StopEvent    `json:"stop,omitempty"`   // stop_status
+	Progress     *TripProgress `json:"progress,omitempty"`
+	Alert        any           `json:"alert,omitempty"`
+	Notification any           `json:"notification,omitempty"` // staff_notification
+	Audience     string        `json:"audience,omitempty"`     // "staff": never sent to parents or drivers
 }
 
 // Live reads and writes live positions in Redis and publishes events.
@@ -286,6 +288,17 @@ func (l *Live) getJSON(ctx context.Context, key string, dst any) (bool, error) {
 }
 
 // PublishAlert sends a delay or emergency to the school's staff.
+// PublishStaffNotification sends a staff inbox item (e.g. "a driver took a route") to the
+// school's staff WebSocket subscribers, so the admin web updates without polling.
+func (l *Live) PublishStaffNotification(ctx context.Context, schoolID, tripID string, n any) error {
+	ev, err := json.Marshal(Event{Type: EventStaffNotification, SchoolID: schoolID, TripID: tripID,
+		Notification: n, Audience: AudienceStaff})
+	if err != nil {
+		return err
+	}
+	return l.rdb.Publish(ctx, eventsKey(schoolID), ev).Err()
+}
+
 func (l *Live) PublishAlert(ctx context.Context, schoolID, tripID string, alert any) error {
 	ev, err := json.Marshal(Event{Type: EventAlert, SchoolID: schoolID, TripID: tripID, Alert: alert, Audience: AudienceStaff})
 	if err != nil {

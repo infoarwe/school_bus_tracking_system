@@ -93,7 +93,7 @@ var (
 		"/api/v1/auth/otp/verify": true, "/api/v1/auth/refresh": true, "/api/v1/branding/logos/{file}": true,
 	}
 	superAdminRoutes = map[string]bool{"/api/v1/schools": true, "/api/v1/audit-logs": true}
-	callerPrefixes   = []string{"/api/v1/auth/", "/api/v1/devices", "/api/v1/branding", "/api/v1/driver/", "/api/v1/parent/"}
+	callerPrefixes   = []string{"/api/v1/auth/", "/api/v1/devices", "/api/v1/branding", "/api/v1/driver/", "/api/v1/parent/", "/api/v1/staff/"}
 	paramRe          = regexp.MustCompile(`\{([A-Za-z]+)\}`)
 )
 
