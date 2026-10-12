@@ -1,2 +1,4 @@
 # Shell scripts run on Linux servers: always LF, even in a Windows checkout.
 *.sh text eol=lf
+# Server config (nginx, compose): LF so a copy from a Windows checkout never shows as changed on the server.
+deploy/** text eol=lf

@@ -1,0 +1,19 @@
+# Override for a server whose own Nginx already owns ports 80/443 (other sites on the
+# same machine). The host Nginx terminates HTTPS (certbot) and forwards SERVER_NAME to
+# 127.0.0.1:${PROXIED_PORT}; see deploy/host-nginx/sbts.conf and deploy/README.md.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.proxied.yml up -d --wait
+#
+# Postgres is also published on 127.0.0.1:${DB_PORT} for SSH-tunnel access (DBeaver etc.).
+# Nothing here listens on a public interface.
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:${DB_PORT:-5434}:5432"
+
+  nginx:
+    environment:
+      NGINX_ENVSUBST_TEMPLATE_DIR: /etc/nginx/templates-proxied
+    ports: !override
+      - "127.0.0.1:${PROXIED_PORT:-8180}:80"
+    volumes: !override []

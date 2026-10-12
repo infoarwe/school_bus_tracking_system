@@ -15,5 +15,7 @@ FROM nginx:1.28-alpine
 RUN rm -f /etc/nginx/conf.d/default.conf
 # The image renders templates/*.template into conf.d/ with ${SERVER_NAME} filled in at start.
 COPY deploy/nginx/templates/ /etc/nginx/templates/
+# Behind a host Nginx (docker-compose.proxied.yml selects it with NGINX_ENVSUBST_TEMPLATE_DIR).
+COPY deploy/nginx/templates-proxied/ /etc/nginx/templates-proxied/
 COPY deploy/nginx/snippets/ /etc/nginx/snippets/
 COPY --from=web /src/dist /usr/share/nginx/html

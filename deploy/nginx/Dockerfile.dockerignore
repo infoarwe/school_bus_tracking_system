@@ -11,4 +11,5 @@
 !frontend/tsconfig.node.json
 !frontend/vite.config.ts
 !deploy/nginx/templates/**
+!deploy/nginx/templates-proxied/**
 !deploy/nginx/snippets/**

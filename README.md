@@ -13,6 +13,33 @@ Go 1.26+ (see `backend/go.mod`), Node 22+, Docker Desktop (on Windows it uses WS
 
 Deploying to a server (shared dev, staging, production): see [deploy/README.md](deploy/README.md).
 
+### Deploy (shared dev server, https://school.ridelogic.in)
+
+The box (`ssh root@103.235.106.21 -p 2024`) also runs the Blue Taxi production sites and has only 1.7 GB RAM, so
+images are **built on your machine** and copied over; never `docker compose build` on the server, and never touch
+its `bluetaxi` Nginx configs or services.
+
+```bash
+# 1. On YOUR WINDOWS PC, not the server: Git Bash (not PowerShell: it corrupts the binary pipe),
+#    in C:\projects\school_bus_tracking_system, with the commit you want to deploy pushed to GitHub.
+git pull
+docker build -t sbts-api:latest backend
+docker build -t sbts-web:latest -f deploy/nginx/Dockerfile .
+docker save sbts-api:latest sbts-web:latest | gzip -1 | ssh -p 2024 root@103.235.106.21 'gunzip | docker load'
+
+# 2. On the server (ssh -p 2024 root@103.235.106.21)
+cd /opt/school_bus_tracking
+mkdir -p /var/backups/sbts && sh deploy/scripts/backup.sh /var/backups/sbts   # migrations only move forward
+git pull          # must say "Updating …" or "Already up to date"; on an error STOP, the deploy did not happen
+cd deploy && C="docker compose -f docker-compose.yml -f docker-compose.proxied.yml"
+$C up -d --no-build --wait
+$C ps             # api/nginx CREATED must be "seconds ago"; migrate Exited (0)
+curl -s https://school.ridelogic.in/health
+```
+
+The host Nginx terminates HTTPS and forwards to the stack on `127.0.0.1:8180`; Postgres is on `127.0.0.1:5434`
+(reach it with an SSH tunnel). Secrets live only in `/opt/school_bus_tracking/deploy/.env` on the server.
+
 ## Run locally
 
 ```sh
