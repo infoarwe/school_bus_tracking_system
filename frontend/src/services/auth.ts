@@ -1,5 +1,5 @@
 import { getData, send } from './api'
-import type { LoginResult, Me, Session } from './types'
+import type { LoginResult, Me, Session, User } from './types'
 
 const device = () => 'Admin web'
 
@@ -13,6 +13,12 @@ export const authApi = {
       device_name: device(),
     }),
   me: () => getData<Me>('/api/v1/auth/me'),
+  updateMe: (name: string) => send<User>('patch', '/api/v1/auth/me', { name }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    send<void>('post', '/api/v1/auth/password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
   logout: () => send<void>('post', '/api/v1/auth/logout'),
   sessions: () => getData<Session[]>('/api/v1/auth/sessions'),
   revokeSession: (id: string) => send<void>('delete', `/api/v1/auth/sessions/${id}`),

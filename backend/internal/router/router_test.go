@@ -375,3 +375,50 @@ func TestAuthRequired(t *testing.T) {
 	e.expect(e.do("GET", "/api/v1/auth/me", "not-a-jwt", nil), 401, "token_invalid")
 	e.expect(e.do("POST", "/api/v1/auth/login", "", map[string]string{"email": "nobody@x.test", "password": "whatever1"}), 401, "invalid_credentials")
 }
+
+func TestOwnProfileAndPassword(t *testing.T) {
+	e := newEnv(t)
+	a := e.school("AAA")
+	e.user(&a, models.RoleTransportManager, "tm@a.test", "")
+	e.user(&a, models.RoleDriver, "", "+919000000301")
+	tok := e.login("tm@a.test")
+	other := e.login("tm@a.test")
+
+	// Name only; email stays as the account manager set it.
+	r := e.do("PATCH", "/api/v1/auth/me", tok, map[string]string{"name": "  Ravi Kumar ", "email": "x@x.test"})
+	e.expect(r, 200, "")
+	if r.data()["name"] != "Ravi Kumar" || r.data()["email"] != "tm@a.test" {
+		t.Errorf("profile = %v", r.data())
+	}
+	e.expect(e.do("PATCH", "/api/v1/auth/me", tok, map[string]string{"name": " "}), 400, "validation_failed")
+
+	// Wrong current password is a field error; nothing changes, other devices stay logged in.
+	bad := e.do("POST", "/api/v1/auth/password", tok, map[string]string{
+		"current_password": "wrong-password", "new_password": "New@Pass123"})
+	e.expect(bad, 400, "validation_failed")
+	if f, _ := bad.Body["error"].(map[string]any)["fields"].(map[string]any); f["current_password"] == nil {
+		t.Errorf("fields = %v", f)
+	}
+	e.expect(e.do("POST", "/api/v1/auth/password", tok, map[string]string{
+		"current_password": testPassword, "new_password": "short"}), 400, "validation_failed")
+	e.expect(e.do("GET", "/api/v1/auth/me", other, nil), 200, "")
+
+	// Success: this session stays, every other one ends, the new password works.
+	e.expect(e.do("POST", "/api/v1/auth/password", tok, map[string]string{
+		"current_password": testPassword, "new_password": "New@Pass123"}), 204, "")
+	e.expect(e.do("GET", "/api/v1/auth/me", tok, nil), 200, "")
+	e.expect(e.do("GET", "/api/v1/auth/me", other, nil), 401, "session_revoked")
+	e.expect(e.do("POST", "/api/v1/auth/login", "", map[string]string{"email": "tm@a.test", "password": testPassword}), 401, "")
+	e.expect(e.do("POST", "/api/v1/auth/login", "", map[string]string{"email": "tm@a.test", "password": "New@Pass123"}), 200, "")
+
+	// App users manage neither (their name and mobile belong to the school).
+	drv := e.otpLogin("9000000301", "driver")
+	e.expect(e.do("PATCH", "/api/v1/auth/me", drv, map[string]string{"name": "x"}), 403, "forbidden")
+	e.expect(e.do("POST", "/api/v1/auth/password", drv, map[string]string{"current_password": "x", "new_password": "New@Pass123"}), 403, "forbidden")
+
+	var n int
+	_ = e.pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_logs WHERE action IN ('auth.profile_update', 'auth.password_change')`).Scan(&n)
+	if n != 2 {
+		t.Errorf("audit entries = %d, want 2", n)
+	}
+}

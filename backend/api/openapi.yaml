@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.12.0
+  version: 0.12.1
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -154,6 +154,8 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.12.1: web users manage their own account: `PATCH /auth/me` (display name) and `POST /auth/password`
+      (current + new password; ends the user's other sessions). Admin web only; no mobile-facing change.
     - 0.12.0 (Sprint 10): flexible route/trip types, additive. Routes gain `supports_outing` (a third, optional
       "Used for" flag). Stops gain `drop_sequence` (Evening Drop's own travel order, independent of `sequence`;
       `PUT /routes/{id}/stops/drop-order`). `trip_type` gains `special_trip`: `route_id` becomes optional
@@ -436,6 +438,33 @@ paths:
                       two_factor_setup_required: { type: boolean }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [Auth]
+      summary: Change my display name (web roles)
+      description: Only `name`; email and mobile are login identities and are changed by whoever manages the account. Audited.
+      operationId: updateMe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 200 }
+            example: { name: Ravi Kumar }
+      responses:
+        "200":
+          description: The updated user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/auth/sessions:
     get:
@@ -464,6 +493,33 @@ paths:
       responses:
         "204": { description: Session ended. }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/auth/password:
+    post:
+      tags: [Auth]
+      summary: Change my password (web roles)
+      description: |
+        Needs the current password. On success every **other** session of the user is logged out; the
+        calling session stays. Wrong current password: `400 validation_failed` with `fields.current_password`.
+        Shares the per-account login rate limit.
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 8, description: "8 characters to 72 bytes" }
+            example: { current_password: Admin@12345, new_password: N3w-Secret-Pass }
+      responses:
+        "204": { description: Password changed. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/auth/2fa/setup:
     post:

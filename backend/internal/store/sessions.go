@@ -54,6 +54,13 @@ func RevokeAllSessions(ctx context.Context, q DBTX, userID string) error {
 	return err
 }
 
+// RevokeOtherSessions ends every session of the user except keepSessionID.
+func RevokeOtherSessions(ctx context.Context, q DBTX, userID, keepSessionID string) error {
+	_, err := q.Exec(ctx, `UPDATE user_sessions SET revoked_at = now()
+		WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL`, userID, keepSessionID)
+	return err
+}
+
 func ListActiveSessions(ctx context.Context, q DBTX, userID, currentSessionID string) ([]models.Session, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, device_name, user_agent, ip, created_at, last_used_at, expires_at

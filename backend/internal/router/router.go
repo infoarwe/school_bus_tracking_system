@@ -108,6 +108,8 @@ func New(d Deps) http.Handler {
 
 				r.Get("/auth/sessions", a.ListSessions)
 				r.Delete("/auth/sessions/{sessionID}", a.RevokeSession)
+				r.With(webRoles).Patch("/auth/me", a.UpdateMe)
+				r.With(webRoles).Post("/auth/password", a.ChangePassword)
 
 				// Driver and Parent apps: scoped to the caller, no school ID in the path.
 				r.With(middleware.RequireRoles(models.AppRoles...)).Post("/devices", a.RegisterDevice)

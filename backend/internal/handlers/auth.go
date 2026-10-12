@@ -361,6 +361,105 @@ func (a *API) RevokeSession(w http.ResponseWriter, r *http.Request) {
 	httpx.NoContent(w)
 }
 
+// UpdateMe changes the caller's own display name (web roles; email and mobile are login
+// identities and stay with whoever manages the account).
+func (a *API) UpdateMe(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !httpx.Decode(w, r, &req) {
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	v := validate.New()
+	v.Required("name", req.Name)
+	v.MaxLen("name", req.Name, 200)
+	if !v.OK() {
+		httpx.ValidationError(w, v.Errors())
+		return
+	}
+	p := auth.FromContext(r.Context())
+	ctx := r.Context()
+	var out *models.User
+	err := a.Store.InTx(ctx, func(q store.DBTX) error {
+		u, err := store.GetUser(ctx, q, p.UserID)
+		if err != nil {
+			return err
+		}
+		if out, err = store.UpdateUserProfile(ctx, q, u.ID, req.Name, u.Email, u.Mobile); err != nil {
+			return err
+		}
+		return a.audit(ctx, q, r, store.AuditEntry{SchoolID: u.SchoolID, Action: "auth.profile_update",
+			EntityType: "user", EntityID: &u.ID, Before: map[string]string{"name": u.Name},
+			After: map[string]string{"name": out.Name}})
+	})
+	if err != nil {
+		storeError(w, r, err, nil)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, out)
+}
+
+// ChangePassword changes the caller's own password (web roles). The current password is
+// required; every other session of the user is logged out, this one stays.
+func (a *API) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !httpx.Decode(w, r, &req) {
+		return
+	}
+	v := validate.New()
+	v.Required("current_password", req.CurrentPassword)
+	if msg := auth.PasswordProblem(req.NewPassword); msg != "" {
+		v.Check(false, "new_password", msg)
+	}
+	if !v.OK() {
+		httpx.ValidationError(w, v.Errors())
+		return
+	}
+	p := auth.FromContext(r.Context())
+	// Password guessing with a stolen session: same per-account budget as login.
+	if !a.allow(w, r, loginAccountRule, "pwchange:"+p.UserID) {
+		return
+	}
+	ctx := r.Context()
+	u, err := store.GetUser(ctx, a.Store.Pool, p.UserID)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	if !auth.CheckPassword(u.PasswordHash, req.CurrentPassword) {
+		httpx.ValidationError(w, validate.Errors{"current_password": "is incorrect"})
+		return
+	}
+	if req.NewPassword == req.CurrentPassword {
+		httpx.ValidationError(w, validate.Errors{"new_password": "must be different from the current password"})
+		return
+	}
+	hash, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	err = a.Store.InTx(ctx, func(q store.DBTX) error {
+		if err := store.SetUserPassword(ctx, q, u.ID, hash); err != nil {
+			return err
+		}
+		if err := store.RevokeOtherSessions(ctx, q, u.ID, p.SessionID); err != nil {
+			return err
+		}
+		return a.audit(ctx, q, r, store.AuditEntry{SchoolID: u.SchoolID, Action: "auth.password_change",
+			EntityType: "user", EntityID: &u.ID})
+	})
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	httpx.NoContent(w)
+}
+
 // SetupTOTP creates a new authenticator secret. It is only active after EnableTOTP.
 func (a *API) SetupTOTP(w http.ResponseWriter, r *http.Request) {
 	p := auth.FromContext(r.Context())
