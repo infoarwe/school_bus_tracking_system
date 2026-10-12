@@ -8,7 +8,6 @@ import {
   Grid,
   Input,
   Segmented,
-  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -16,19 +15,16 @@ import {
 } from 'antd'
 import {
   ArrowLeftOutlined,
-  BellOutlined,
   CarOutlined,
   LeftOutlined,
   RightOutlined,
   SearchOutlined,
 } from '@ant-design/icons'
-import AlertList from '../components/AlertList'
 import LiveMap from '../components/LiveMap'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StopProgressList from '../components/StopProgressList'
 import { busState, busStateColors, type BusState } from '../components/liveMapTypes'
-import { useAlerts } from '../context/AlertsContext'
 import { useCurrentSchool } from '../context/SchoolContext'
 import { useLiveBuses } from '../hooks/useLiveBuses'
 import type { BusLocation } from '../services/live'
@@ -78,7 +74,6 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   // Wide screens: the panel floats over the map. Narrow ones: it sits under the map.
   const floating = !!screens.lg
   const { school } = useCurrentSchool()
-  const { alerts } = useAlerts()
   const live = useLiveBuses(schoolId)
   const [startedTrips, setStartedTrips] = useState<Trip[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -88,7 +83,6 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   const [stateFilter, setStateFilter] = useState<BusState | 'all'>('all')
   const [query, setQuery] = useState('')
   const [panelOpen, setPanelOpen] = useState(true)
-  const [tab, setTab] = useState<'buses' | 'alerts'>('buses')
 
   // Trips in progress today, refreshed whenever a trip changes status.
   useEffect(() => {
@@ -150,7 +144,6 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
 
   const select = (id: string) => {
     setSelectedId(id === selectedId ? null : id)
-    setTab('buses')
     setPanelOpen(true)
   }
 
@@ -279,31 +272,14 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   )
 
   const panel = (
-    <Tabs
-      activeKey={tab}
-      onChange={(k) => setTab(k as 'buses' | 'alerts')}
-      style={{ padding: '0 12px' }}
-      items={[
-        {
-          key: 'buses',
-          label: (
-            <Flex align="center" gap={6}>
-              <CarOutlined /> Buses on trips <Badge count={allBuses.length} showZero color="blue" />
-            </Flex>
-          ),
-          children: selected ? busDetail : busList,
-        },
-        {
-          key: 'alerts',
-          label: (
-            <Flex align="center" gap={6}>
-              <BellOutlined /> Alerts <Badge count={alerts.length} />
-            </Flex>
-          ),
-          children: <AlertList schoolId={schoolId} compact />,
-        },
-      ]}
-    />
+    <div style={{ padding: '0 12px' }}>
+      <Flex align="center" gap={8} style={{ padding: '14px 4px 10px' }}>
+        <CarOutlined style={{ color: token.colorPrimary }} />
+        <Typography.Text strong>Buses on trips</Typography.Text>
+        <Badge count={allBuses.length} showZero color="blue" />
+      </Flex>
+      {selected ? busDetail : busList}
+    </div>
   )
 
   const legend = (
@@ -391,11 +367,11 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
         {floating && (
           <>
             {panelOpen && <FloatingPanel>{panel}</FloatingPanel>}
-            <Tooltip title={panelOpen ? 'Hide list' : 'Show buses and alerts'} placement="right">
+            <Tooltip title={panelOpen ? 'Hide list' : 'Show buses'} placement="right">
               <Button
                 shape="circle"
                 icon={panelOpen ? <LeftOutlined /> : <RightOutlined />}
-                aria-label={panelOpen ? 'Hide list' : 'Show buses and alerts'}
+                aria-label={panelOpen ? 'Hide list' : 'Show buses'}
                 aria-expanded={panelOpen}
                 onClick={() => setPanelOpen((o) => !o)}
                 style={{
