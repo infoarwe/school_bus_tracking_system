@@ -1,25 +1,34 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   App,
   Badge,
-  Card,
-  Col,
+  Button,
   Empty,
   Flex,
+  Grid,
   Input,
-  Row,
   Segmented,
-  Select,
-  Space,
+  Tabs,
   Tag,
+  Tooltip,
   Typography,
+  theme,
 } from 'antd'
+import {
+  ArrowLeftOutlined,
+  BellOutlined,
+  CarOutlined,
+  LeftOutlined,
+  RightOutlined,
+  SearchOutlined,
+} from '@ant-design/icons'
 import AlertList from '../components/AlertList'
 import LiveMap from '../components/LiveMap'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StopProgressList from '../components/StopProgressList'
-import { busState, busStateColors } from '../components/liveMapTypes'
+import { busState, busStateColors, type BusState } from '../components/liveMapTypes'
+import { useAlerts } from '../context/AlertsContext'
 import { useCurrentSchool } from '../context/SchoolContext'
 import { useLiveBuses } from '../hooks/useLiveBuses'
 import type { BusLocation } from '../services/live'
@@ -29,6 +38,9 @@ import { tripTypeLabels, type Stop, type Trip, type TripType } from '../services
 import { todayIn } from '../utils/dates'
 import { formatDistance, formatEta } from '../utils/format'
 import { errorMessage } from '../utils/formErrors'
+
+const MAP_HEIGHT = 680
+const PANEL_WIDTH = 380
 
 export default function LiveTrackingPage() {
   return <RequireSchool>{(schoolId) => <LiveTracking schoolId={schoolId} />}</RequireSchool>
@@ -41,25 +53,42 @@ function ago(iso: string, now: number) {
   return `${Math.floor(s / 3600)} h ago`
 }
 
-/** "Moving · 32 km/h", "Stopped", "Offline · last seen 4 min ago" */
-function statusLine(b: BusLocation, now: number) {
-  const state = busState(b)
-  if (state === 'offline') return `Offline · last seen ${ago(b.received_at, now)}`
-  if (state === 'stopped') return `Stopped · updated ${ago(b.received_at, now)}`
-  return `Moving · ${Math.round((b.speed_mps ?? 0) * 3.6)} km/h`
+const stateLabels: Record<BusState, string> = {
+  moving: 'Moving',
+  stopped: 'Stopped',
+  offline: 'Offline',
+}
+const stateTagColors: Record<BusState, string> = {
+  moving: 'green',
+  stopped: 'orange',
+  offline: 'default',
+}
+
+/** "32 km/h" while moving, otherwise how long ago the last fix arrived. */
+function stateDetail(b: BusLocation, now: number) {
+  return busState(b) === 'moving'
+    ? `${Math.round((b.speed_mps ?? 0) * 3.6)} km/h`
+    : ago(b.received_at, now)
 }
 
 function LiveTracking({ schoolId }: { schoolId: string }) {
   const { message } = App.useApp()
+  const { token } = theme.useToken()
+  const screens = Grid.useBreakpoint()
+  // Wide screens: the panel floats over the map. Narrow ones: it sits under the map.
+  const floating = !!screens.lg
   const { school } = useCurrentSchool()
+  const { alerts } = useAlerts()
   const live = useLiveBuses(schoolId)
   const [startedTrips, setStartedTrips] = useState<Trip[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [routeStops, setRouteStops] = useState<Stop[]>([])
   const [now, setNow] = useState(() => Date.now())
   const [typeFilter, setTypeFilter] = useState<TripType | 'all'>('all')
-  const [stateFilter, setStateFilter] = useState<'all' | 'moving' | 'stopped' | 'offline'>('all')
+  const [stateFilter, setStateFilter] = useState<BusState | 'all'>('all')
   const [query, setQuery] = useState('')
+  const [panelOpen, setPanelOpen] = useState(true)
+  const [tab, setTab] = useState<'buses' | 'alerts'>('buses')
 
   // Trips in progress today, refreshed whenever a trip changes status.
   useEffect(() => {
@@ -79,12 +108,17 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   const q = query.trim().toLowerCase()
   const matches = (bus: string, route: string, driver: string) =>
     !q || [bus, route, driver].some((x) => x.toLowerCase().includes(q))
-  const buses = allBuses.filter(
+  // Trip type and search narrow the list; the status chips count within that.
+  const inScope = allBuses.filter(
     (b) =>
       (typeFilter === 'all' || b.trip_type === typeFilter) &&
-      (stateFilter === 'all' || busState(b) === stateFilter) &&
       matches(b.bus_number, b.route_code, b.driver_name),
   )
+  const counts = { moving: 0, stopped: 0, offline: 0 }
+  inScope.forEach((b) => counts[busState(b)]++)
+  const buses = inScope
+    .filter((b) => stateFilter === 'all' || busState(b) === stateFilter)
+    .sort((a, b) => a.route_code.localeCompare(b.route_code))
   const selected = selectedId ? live.buses[selectedId] : undefined
   const selectedRouteId =
     selected?.route_id ?? startedTrips.find((t) => t.id === selectedId)?.route?.id
@@ -114,175 +148,322 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
       matches(t.bus.vehicle_number, t.route?.code ?? t.title, t.driver.name),
   )
 
+  const select = (id: string) => {
+    setSelectedId(id === selectedId ? null : id)
+    setTab('buses')
+    setPanelOpen(true)
+  }
+
+  const chip = (value: BusState | 'all', label: string, n: number) => (
+    <Tag.CheckableTag
+      key={value}
+      checked={stateFilter === value}
+      onChange={() => setStateFilter(value)}
+      style={{ padding: '2px 10px', borderRadius: 999 }}
+    >
+      {label} ({n})
+    </Tag.CheckableTag>
+  )
+
+  const busList = (
+    <>
+      <Flex gap={4} wrap style={{ padding: '0 4px 8px' }}>
+        {chip('all', 'All', inScope.length)}
+        {chip('moving', 'Moving', counts.moving)}
+        {chip('stopped', 'Stopped', counts.stopped)}
+        {chip('offline', 'Offline', counts.offline)}
+      </Flex>
+      {buses.length === 0 && waiting.length === 0 && (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={
+            allBuses.length || startedTrips.length
+              ? 'No buses match these filters.'
+              : 'No trips in progress. Buses appear here when a driver starts a trip.'
+          }
+        />
+      )}
+      {buses.map((b) => {
+        const state = busState(b)
+        return (
+          <div
+            key={b.trip_id}
+            className="stop-row"
+            role="button"
+            tabIndex={0}
+            onClick={() => select(b.trip_id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                select(b.trip_id)
+              }
+            }}
+          >
+            <BusIcon color={busStateColors[state]} />
+            <div className="stop-row__body">
+              <Typography.Text strong>{b.bus_number}</Typography.Text>
+              <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
+                {b.route_code} · {tripTypeLabels[b.trip_type]}
+              </Typography.Text>
+            </div>
+            <Flex vertical align="flex-end" gap={2} style={{ flex: 'none' }}>
+              <Tag color={stateTagColors[state]} style={{ margin: 0 }}>
+                {stateLabels[state]}
+              </Tag>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {stateDetail(b, now)}
+              </Typography.Text>
+            </Flex>
+            <RightOutlined style={{ color: token.colorTextQuaternary, fontSize: 12 }} />
+          </div>
+        )
+      })}
+      {waiting.map((t) => (
+        <div key={t.id} className="stop-row" style={{ cursor: 'default' }}>
+          <BusIcon color={token.colorTextQuaternary} />
+          <div className="stop-row__body">
+            <Typography.Text strong>{t.bus.vehicle_number}</Typography.Text>
+            <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
+              {t.route?.code ?? t.title} · {tripTypeLabels[t.trip_type]}
+            </Typography.Text>
+            <Typography.Text type="warning" style={{ fontSize: 12 }}>
+              Started, waiting for GPS from the Driver app
+            </Typography.Text>
+          </div>
+        </div>
+      ))}
+    </>
+  )
+
+  const busDetail = selected && (
+    <Flex vertical gap="small">
+      <Flex align="center" gap="small">
+        <Button
+          type="text"
+          icon={<ArrowLeftOutlined />}
+          aria-label="Back to all buses"
+          onClick={() => setSelectedId(null)}
+        />
+        <BusIcon color={busStateColors[busState(selected)]} />
+        <div style={{ minWidth: 0 }}>
+          <Typography.Text strong>{selected.bus_number}</Typography.Text>
+          <br />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {selected.route_code} · {tripTypeLabels[selected.trip_type]} · {selected.driver_name}
+          </Typography.Text>
+        </div>
+      </Flex>
+      <Flex gap="small" wrap align="center">
+        <Tag color={stateTagColors[busState(selected)]}>{stateLabels[busState(selected)]}</Tag>
+        <Typography.Text type={selected.stale ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
+          {busState(selected) === 'moving'
+            ? stateDetail(selected, now)
+            : `Last GPS ${ago(selected.received_at, now)}`}
+        </Typography.Text>
+      </Flex>
+      {nextStop(selected.trip_id) && (
+        <Typography.Text style={{ fontSize: 13 }}>
+          Next: <strong>{nextStop(selected.trip_id)!.name}</strong> · ETA{' '}
+          {formatEta(nextStop(selected.trip_id)!.eta_seconds)} ·{' '}
+          {formatDistance(nextStop(selected.trip_id)!.distance_m)}
+        </Typography.Text>
+      )}
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        Stops ·{' '}
+        {selectedProgress
+          ? `ETA ${selectedProgress.eta_source === 'google' ? 'by Google' : 'estimated'}`
+          : 'status appears with the next GPS update'}
+      </Typography.Text>
+      {selectedProgress && <StopProgressList stops={selectedProgress.stops} />}
+    </Flex>
+  )
+
+  const panel = (
+    <Tabs
+      activeKey={tab}
+      onChange={(k) => setTab(k as 'buses' | 'alerts')}
+      style={{ padding: '0 12px' }}
+      items={[
+        {
+          key: 'buses',
+          label: (
+            <Flex align="center" gap={6}>
+              <CarOutlined /> Buses on trips <Badge count={allBuses.length} showZero color="blue" />
+            </Flex>
+          ),
+          children: selected ? busDetail : busList,
+        },
+        {
+          key: 'alerts',
+          label: (
+            <Flex align="center" gap={6}>
+              <BellOutlined /> Alerts <Badge count={alerts.length} />
+            </Flex>
+          ),
+          children: <AlertList schoolId={schoolId} compact />,
+        },
+      ]}
+    />
+  )
+
+  const legend = (
+    <Flex
+      gap="middle"
+      align="center"
+      style={{
+        position: 'absolute',
+        right: 64,
+        bottom: 24,
+        padding: '6px 14px',
+        background: token.colorBgContainer,
+        borderRadius: 999,
+        boxShadow: token.boxShadowSecondary,
+        fontSize: 12,
+      }}
+    >
+      {(['moving', 'stopped', 'offline'] as const).map((s) => (
+        <Flex key={s} align="center" gap={6}>
+          <span
+            style={{ width: 8, height: 8, borderRadius: '50%', background: busStateColors[s] }}
+          />
+          {stateLabels[s]}
+        </Flex>
+      ))}
+    </Flex>
+  )
+
   return (
     <Flex vertical gap="middle">
       <PageHeader
-        title="Live Tracking"
-        subtitle={`${allBuses.length} bus(es) sending GPS · updates arrive automatically`}
+        title={
+          <Flex align="center" gap="small" wrap>
+            Live Tracking
+            <Tag
+              color={live.connected ? 'green' : 'red'}
+              style={{ fontWeight: 400, borderRadius: 999 }}
+            >
+              <Badge status={live.connected ? 'success' : 'error'} />{' '}
+              {live.connected ? 'Live' : 'Reconnecting…'}
+            </Tag>
+          </Flex>
+        }
+        subtitle={`${allBuses.length} bus${allBuses.length === 1 ? '' : 'es'} on trips · updates arrive automatically`}
         extra={
-          <Badge
-            status={live.connected ? 'success' : 'error'}
-            text={live.connected ? 'Live' : 'Reconnecting…'}
-          />
+          <Flex gap="small" wrap align="center" justify="flex-end">
+            <Segmented
+              aria-label="Trip type"
+              value={typeFilter}
+              onChange={(v) => setTypeFilter(v as TripType | 'all')}
+              options={[
+                { value: 'all', label: 'All trips' },
+                { value: 'morning_pickup', label: tripTypeLabels.morning_pickup },
+                { value: 'evening_drop', label: tripTypeLabels.evening_drop },
+              ]}
+            />
+            <Input
+              allowClear
+              prefix={<SearchOutlined />}
+              aria-label="Search bus, route or driver"
+              placeholder="Search bus, route or driver…"
+              style={{ width: 260 }}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </Flex>
         }
       />
-      <Flex gap="small" wrap align="center">
-        <Segmented
-          aria-label="Trip type"
-          value={typeFilter}
-          onChange={(v) => setTypeFilter(v as TripType | 'all')}
-          options={[
-            { value: 'all', label: 'All trips' },
-            { value: 'morning_pickup', label: tripTypeLabels.morning_pickup },
-            { value: 'evening_drop', label: tripTypeLabels.evening_drop },
-          ]}
+
+      <div
+        style={{
+          position: 'relative',
+          borderRadius: token.borderRadiusLG,
+          overflow: 'hidden',
+          boxShadow: token.boxShadowTertiary,
+        }}
+      >
+        <LiveMap
+          buses={buses}
+          selectedId={selectedId}
+          onSelect={select}
+          routeStops={selectedId ? routeStops : []}
+          height={floating ? MAP_HEIGHT : 420}
         />
-        <Select
-          aria-label="Bus status"
-          style={{ width: 150 }}
-          value={stateFilter}
-          onChange={setStateFilter}
-          options={[
-            { value: 'all', label: 'Any status' },
-            { value: 'moving', label: 'Moving' },
-            { value: 'stopped', label: 'Stopped' },
-            { value: 'offline', label: 'Offline' },
-          ]}
-        />
-        <Input.Search
-          allowClear
-          aria-label="Search bus, route or driver"
-          placeholder="Search bus, route or driver"
-          style={{ width: 240 }}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-      </Flex>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={8}>
-          <Card
-            title="Buses on trips"
-            styles={{ body: { padding: 8, maxHeight: 560, overflowY: 'auto' } }}
-          >
-            {buses.length === 0 && waiting.length === 0 && (
-              <Empty
-                description={
-                  allBuses.length || startedTrips.length
-                    ? 'No buses match these filters.'
-                    : 'No trips in progress. Buses appear here when a driver starts a trip.'
-                }
+
+        {floating && (
+          <>
+            {panelOpen && <FloatingPanel>{panel}</FloatingPanel>}
+            <Tooltip title={panelOpen ? 'Hide list' : 'Show buses and alerts'} placement="right">
+              <Button
+                shape="circle"
+                icon={panelOpen ? <LeftOutlined /> : <RightOutlined />}
+                aria-label={panelOpen ? 'Hide list' : 'Show buses and alerts'}
+                aria-expanded={panelOpen}
+                onClick={() => setPanelOpen((o) => !o)}
+                style={{
+                  position: 'absolute',
+                  top: 24,
+                  left: panelOpen ? 16 + PANEL_WIDTH + 8 : 16,
+                  boxShadow: token.boxShadowSecondary,
+                }}
               />
-            )}
-            {buses
-              .sort((a, b) => a.route_code.localeCompare(b.route_code))
-              .map((b) => (
-                <div
-                  key={b.trip_id}
-                  className={`stop-row${b.trip_id === selectedId ? ' stop-row--selected' : ''}`}
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={b.trip_id === selectedId}
-                  onClick={() => setSelectedId(b.trip_id === selectedId ? null : b.trip_id)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      setSelectedId(b.trip_id === selectedId ? null : b.trip_id)
-                    }
-                  }}
-                >
-                  <span
-                    className="stop-row__seq"
-                    style={{ background: busStateColors[busState(b)], width: 12, height: 12 }}
-                  />
-                  <div className="stop-row__body">
-                    <Typography.Text strong>
-                      Bus: {b.bus_number} · {b.route_code}
-                    </Typography.Text>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      <Tag color={b.trip_type === 'morning_pickup' ? 'gold' : 'geekblue'}>
-                        {tripTypeLabels[b.trip_type]}
-                      </Tag>
-                      {b.driver_name}
-                    </Typography.Text>
-                    <Typography.Text style={{ fontSize: 12 }} type={b.stale ? 'danger' : undefined}>
-                      {statusLine(b, now)}
-                    </Typography.Text>
-                    {nextStop(b.trip_id) && (
-                      <Typography.Text style={{ fontSize: 12 }}>
-                        Next: {nextStop(b.trip_id)!.name} · ETA{' '}
-                        {formatEta(nextStop(b.trip_id)!.eta_seconds)} ·{' '}
-                        {formatDistance(nextStop(b.trip_id)!.distance_m)}
-                      </Typography.Text>
-                    )}
-                  </div>
-                </div>
-              ))}
-            {waiting.map((t) => (
-              <div key={t.id} className="stop-row" style={{ cursor: 'default' }}>
-                <span
-                  className="stop-row__seq"
-                  style={{ background: '#d9d9d9', width: 12, height: 12 }}
-                />
-                <div className="stop-row__body">
-                  <Typography.Text strong>
-                    Bus: {t.bus.vehicle_number} · {t.route?.code ?? t.title}
-                  </Typography.Text>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {tripTypeLabels[t.trip_type]} · {t.driver.name}
-                  </Typography.Text>
-                  <Typography.Text type="warning" style={{ fontSize: 12 }}>
-                    Started, waiting for GPS from the Driver app
-                  </Typography.Text>
-                </div>
-              </div>
-            ))}
-          </Card>
-          <Card title="Alerts" size="small" style={{ marginTop: 16 }}>
-            <AlertList schoolId={schoolId} compact />
-          </Card>
-          {selected && (
-            <Card
-              title={`${selected.route_code} · stops`}
-              style={{ marginTop: 16 }}
-              styles={{ body: { maxHeight: 420, overflowY: 'auto' } }}
-              extra={
-                selectedProgress && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    ETA {selectedProgress.eta_source === 'google' ? 'by Google' : 'estimated'}
-                  </Typography.Text>
-                )
-              }
-            >
-              {selectedProgress ? (
-                <StopProgressList stops={selectedProgress.stops} />
-              ) : (
-                <Typography.Text type="secondary">
-                  Stop status appears with the next GPS update.
-                </Typography.Text>
-              )}
-            </Card>
-          )}
-        </Col>
-        <Col xs={24} lg={16}>
-          <Card styles={{ body: { padding: 8 } }}>
-            <LiveMap
-              buses={buses}
-              selectedId={selectedId}
-              onSelect={(id) => setSelectedId(id === selectedId ? null : id)}
-              routeStops={selectedId ? routeStops : []}
-            />
-            <Space size="middle" wrap style={{ marginTop: 8, paddingLeft: 4 }}>
-              {(['moving', 'stopped', 'offline'] as const).map((s) => (
-                <Tag key={s} color={busStateColors[s]}>
-                  {s[0].toUpperCase() + s.slice(1)}
-                </Tag>
-              ))}
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Click a bus to see its route, stop status and ETA.
-              </Typography.Text>
-            </Space>
-          </Card>
-        </Col>
-      </Row>
+            </Tooltip>
+            {legend}
+          </>
+        )}
+      </div>
+
+      {!floating && (
+        <div
+          style={{
+            background: token.colorBgContainer,
+            borderRadius: token.borderRadiusLG,
+            paddingBottom: 8,
+          }}
+        >
+          {panel}
+        </div>
+      )}
+    </Flex>
+  )
+}
+
+function FloatingPanel({ children }: { children: ReactNode }) {
+  const { token } = theme.useToken()
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 16,
+        left: 16,
+        bottom: 16,
+        width: PANEL_WIDTH,
+        background: token.colorBgContainer,
+        borderRadius: token.borderRadiusLG,
+        boxShadow: token.boxShadowSecondary,
+        overflowY: 'auto',
+        paddingBottom: 8,
+      }}
+    >
+      {children}
+    </div>
+  )
+}
+
+function BusIcon({ color }: { color: string }) {
+  return (
+    <Flex
+      align="center"
+      justify="center"
+      style={{
+        flex: 'none',
+        width: 36,
+        height: 36,
+        borderRadius: 10,
+        background: `${color}22`,
+        color,
+        fontSize: 18,
+      }}
+    >
+      <CarOutlined />
     </Flex>
   )
 }

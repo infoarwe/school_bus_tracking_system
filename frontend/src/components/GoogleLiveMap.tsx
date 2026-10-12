@@ -18,6 +18,9 @@ export default function GoogleLiveMap({
         defaultZoom={5}
         gestureHandling="greedy"
         clickableIcons={false}
+        // The bus list floats over the top-left corner; keep Google's controls on the right.
+        mapTypeControl={false}
+        streetViewControl={false}
         style={{ height, width: '100%', borderRadius: 8, overflow: 'hidden' }}
       >
         <Overlay
