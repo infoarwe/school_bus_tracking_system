@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.12.1
+  version: 0.12.2
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -89,9 +89,12 @@ info:
       (Settings → Push notifications), and the server sends that school's pushes through it.
     - After login, and whenever FCM issues a new token, call `POST /devices` with `{token, platform}`. The device
       is tied to that login: after logout or suspension it receives nothing. `POST /devices/unregister` removes it.
+    - **No FCM topics.** The server sends each push to the registered device tokens of the parents who should
+      get it (their own child's trip, route or school). Do not subscribe to topics: a topic cannot check who is
+      logged in, so it would leak one route's or child's alerts to other phones.
     - Pushes are FCM messages with `notification` (title, body) and `data`. Android: channel `bus_updates`, high
       priority. Every push has `data.type` and `data.notification_id`; trip pushes add `trip_id`, `route_id`,
-      `trip_type`, stop pushes add `stop_id`, child-specific pushes add `student_ids` (comma-separated: open that
+      `trip_type`, stop pushes add `stop_id`, `bus_delayed`/`bus_breakdown` add `delay_id`, child-specific pushes add `student_ids` (comma-separated: open that
       child; with several, the title starts with their names, e.g. `Asha, Arjun · Bus approaching`).
     - `data.type` values: `bus_started`, `bus_approaching`, `bus_reached`, `bus_crossed`, `bus_delayed`,
       `bus_breakdown`, `school_reached`, `trip_completed`, `trip_cancelled`, `announcement` (adds `announcement_id`,
@@ -154,6 +157,7 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.12.2: documentation only: pushes are token-based (no FCM topics); delay/breakdown pushes carry `delay_id`.
     - 0.12.1: web users manage their own account: `PATCH /auth/me` (display name) and `POST /auth/password`
       (current + new password; ends the user's other sessions). Admin web only; no mobile-facing change.
     - 0.12.0 (Sprint 10): flexible route/trip types, additive. Routes gain `supports_outing` (a third, optional
