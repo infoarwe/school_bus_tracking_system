@@ -48,6 +48,7 @@ func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
+	r.Use(middleware.EchoRequestID)
 	if d.TrustProxyHeaders {
 		r.Use(chimw.RealIP)
 	}

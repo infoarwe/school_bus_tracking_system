@@ -36,7 +36,7 @@ export default function MapsConfigError({
       description={compact ? undefined : body}
       action={
         canConfigure && !compact ? (
-          <Button size="small" onClick={() => navigate('/settings')}>
+          <Button size="small" onClick={() => navigate('/settings?tab=maps')}>
             Open Settings
           </Button>
         ) : undefined
@@ -63,7 +63,7 @@ export default function MapsConfigError({
     >
       <div style={{ maxWidth: 420 }}>{alert}</div>
       {canConfigure && (
-        <Button icon={<EnvironmentOutlined />} onClick={() => navigate('/settings')}>
+        <Button icon={<EnvironmentOutlined />} onClick={() => navigate('/settings?tab=maps')}>
           Open Settings → Maps
         </Button>
       )}

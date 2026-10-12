@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Alert,
   App,
@@ -9,6 +10,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Tabs,
   Typography,
 } from 'antd'
 import BrandingSettingsCard from '../components/BrandingSettingsCard'
@@ -24,16 +26,46 @@ import { applyApiErrors } from '../utils/formErrors'
 
 // School settings. Sprint 8 adds geofence defaults, retention and more; maps keys come first
 // because every school uses its own Google Maps keys.
+const tabs = ['maps', 'tracking', 'push', 'branding'] as const
+type Tab = (typeof tabs)[number]
+
+// One tab per area; ?tab= keeps the choice in the URL (links such as "Open Settings → Maps").
 export default function SettingsPage() {
+  const [params, setParams] = useSearchParams()
+  const requested = params.get('tab') as Tab | null
+  const active: Tab = requested && tabs.includes(requested) ? requested : 'maps'
+
   return (
     <RequireSchool>
       {(schoolId, schoolName) => (
         <Flex vertical gap="middle">
           <PageHeader title="Settings" subtitle={schoolName} />
-          <MapsSettingsCard schoolId={schoolId} />
-          <TrackingSettingsCard schoolId={schoolId} />
-          <PushSettingsCard schoolId={schoolId} />
-          <BrandingSettingsCard schoolId={schoolId} />
+          <Tabs
+            activeKey={active}
+            onChange={(key) => setParams({ tab: key }, { replace: true })}
+            items={[
+              {
+                key: 'maps',
+                label: 'Google Maps',
+                children: <MapsSettingsCard schoolId={schoolId} />,
+              },
+              {
+                key: 'tracking',
+                label: 'Live tracking',
+                children: <TrackingSettingsCard schoolId={schoolId} />,
+              },
+              {
+                key: 'push',
+                label: 'Push notifications',
+                children: <PushSettingsCard schoolId={schoolId} />,
+              },
+              {
+                key: 'branding',
+                label: 'App branding',
+                children: <BrandingSettingsCard schoolId={schoolId} />,
+              },
+            ]}
+          />
         </Flex>
       )}
     </RequireSchool>
