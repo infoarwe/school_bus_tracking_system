@@ -4,8 +4,9 @@
 //
 // It CREATES DATA (routes, buses, drivers, trips, students, parents) in the school of
 // the admin it logs in as. Run it only against a throwaway stack (see deploy/README.md,
-// "Load test"), with OTP_DEV_CODE set and rate limits raised or off (all traffic comes
-// from one IP):
+// "Load test"), with rate limits raised or off (all traffic comes from one IP). Driver/
+// parent logins read the real, freshly generated OTP from POST /auth/otp/send's
+// development_otp response field, so the API must be running outside production:
 //
 //	go run ./cmd/loadtest -api https://localhost:8443 -insecure -buses 50 -parents 300 -duration 3m -yes
 package main
@@ -34,11 +35,11 @@ import (
 )
 
 type options struct {
-	api, adminEmail, adminPassword, otp string
-	buses, parents                      int
-	duration, interval                  time.Duration
-	targetP95                           time.Duration
-	insecure, yes                       bool
+	api, adminEmail, adminPassword string
+	buses, parents                 int
+	duration, interval             time.Duration
+	targetP95                      time.Duration
+	insecure, yes                  bool
 }
 
 func main() {
@@ -46,7 +47,6 @@ func main() {
 	flag.StringVar(&o.api, "api", "https://localhost:8443", "API origin")
 	flag.StringVar(&o.adminEmail, "admin-email", "admin@demo.local", "School Admin login (from cmd/seed)")
 	flag.StringVar(&o.adminPassword, "admin-password", "Admin@12345", "School Admin password")
-	flag.StringVar(&o.otp, "otp", "123456", "the API's OTP_DEV_CODE")
 	flag.IntVar(&o.buses, "buses", 50, "buses (each a driver with a started trip)")
 	flag.IntVar(&o.parents, "parents", 300, "parents watching a trip over the WebSocket")
 	flag.DurationVar(&o.duration, "duration", 3*time.Minute, "how long buses send GPS")
@@ -145,14 +145,22 @@ func (c *client) create(ctx context.Context, path, token string, body any) (stri
 	return r.ID, err
 }
 
-func (c *client) otpLogin(ctx context.Context, mobile, app, code string) (string, error) {
-	if err := c.call(ctx, "POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": app}, nil); err != nil {
+// otpLogin reads the real, freshly generated OTP from the send response's development_otp field
+// (present only outside production) - never a fixed/configured code.
+func (c *client) otpLogin(ctx context.Context, mobile, app string) (string, error) {
+	var sent struct {
+		DevelopmentOTP string `json:"development_otp"`
+	}
+	if err := c.call(ctx, "POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": app}, &sent); err != nil {
 		return "", err
+	}
+	if sent.DevelopmentOTP == "" {
+		return "", fmt.Errorf("no development_otp in the send response for %s - the API must be running outside production", mobile)
 	}
 	var t struct {
 		AccessToken string `json:"access_token"`
 	}
-	err := c.call(ctx, "POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": app, "code": code}, &t)
+	err := c.call(ctx, "POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": app, "code": sent.DevelopmentOTP}, &t)
 	return t.AccessToken, err
 }
 
@@ -248,7 +256,7 @@ func setup(ctx context.Context, c *client, o options) ([]*bus, []*parent, error)
 		if err != nil {
 			return fmt.Errorf("trip: %w", err)
 		}
-		tok, err := c.otpLogin(ctx, mobile, "driver", o.otp)
+		tok, err := c.otpLogin(ctx, mobile, "driver")
 		if err != nil {
 			return fmt.Errorf("driver login: %w", err)
 		}
@@ -285,7 +293,7 @@ func setup(ctx context.Context, c *client, o options) ([]*bus, []*parent, error)
 			"children": []map[string]string{{"student_id": studentID}}}); err != nil {
 			return fmt.Errorf("parent: %w", err)
 		}
-		tok, err := c.otpLogin(ctx, mobile, "parent", o.otp)
+		tok, err := c.otpLogin(ctx, mobile, "parent")
 		if err != nil {
 			return fmt.Errorf("parent login: %w", err)
 		}

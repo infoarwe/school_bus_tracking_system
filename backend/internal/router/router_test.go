@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,7 +37,6 @@ import (
 
 const (
 	testPassword     = "Password@123"
-	devOTP           = "123456"
 	testMaxLogoBytes = 64 << 10
 )
 
@@ -102,7 +102,6 @@ func newEnv(t *testing.T) *env {
 		Tokens:               auth.NewTokenManager("test-secret-test-secret-test-secret", time.Minute, time.Hour),
 		SMS:                  auth.LogSender{},
 		OTPTTL:               5 * time.Minute,
-		OTPDevCode:           devOTP,
 		Secrets:              testSecrets(t),
 		Live:                 live,
 		Hub:                  hub,
@@ -280,14 +279,20 @@ func TestOTPLoginAndRefresh(t *testing.T) {
 	e.user(&a, models.RoleDriver, "", "+919000000001")
 
 	send := map[string]string{"mobile": "90000 00001", "app": "driver"}
-	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", send), 200, "")
+	first := e.do("POST", "/api/v1/auth/otp/send", "", send)
+	e.expect(first, 200, "")
+	code, _ := first.data()["development_otp"].(string)
+	if len(code) != 6 {
+		t.Fatalf("development_otp = %q, want a fresh 6-digit code", code)
+	}
 	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", send), 429, "otp_too_soon")
-	// Unknown numbers get the same answer, so registered numbers cannot be discovered.
-	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9111111111", "app": "driver"}), 200, "")
+	// Driver login intentionally rejects unknown numbers up front (see SendOTP's doc comment);
+	// unknown parent numbers still get the enumeration-safe 200 (TestSendOTPDevelopmentCode).
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9111111111", "app": "driver"}), 403, "driver_not_registered")
 
 	verify := map[string]string{"mobile": "9000000001", "app": "driver", "code": "000000"}
 	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", verify), 401, "otp_invalid")
-	verify["code"] = devOTP
+	verify["code"] = code
 	ok := e.do("POST", "/api/v1/auth/otp/verify", "", verify)
 	e.expect(ok, 200, "")
 	access := ok.data()["access_token"].(string)
@@ -312,6 +317,201 @@ func TestOTPLoginAndRefresh(t *testing.T) {
 	// Logout revokes the session.
 	e.expect(e.do("POST", "/api/v1/auth/logout", access, nil), 204, "")
 	e.expect(e.do("GET", "/api/v1/auth/me", access, nil), 401, "session_revoked")
+}
+
+// clearOTPCooldown backdates otp_codes rows for mobile so the next send isn't rejected by the
+// 30-second resend cooldown; tests can't wait 30 seconds between every call. mobile must be the
+// normalized form (+91XXXXXXXXXX) actually stored in otp_codes - the same form the SMS-dev log
+// line prints - not necessarily the raw string a request body used.
+func clearOTPCooldown(e *env, mobile string) {
+	e.t.Helper()
+	tag, err := e.pool.Exec(context.Background(),
+		`UPDATE otp_codes SET created_at = now() - interval '1 hour' WHERE mobile = $1`, mobile)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if tag.RowsAffected() == 0 {
+		e.t.Fatalf("clearOTPCooldown: no otp_codes rows matched mobile %q (check normalization, e.g. +91 prefix)", mobile)
+	}
+}
+
+// TestSendOTPDevelopmentCode covers the development_otp response field: fresh random generation
+// (not a fixed/.env-sourced value), exact match with what verify accepts, decoy parity for
+// unregistered numbers (anti-enumeration), and absence in production.
+func TestSendOTPDevelopmentCode(t *testing.T) {
+	e := newEnv(t)
+	a := e.school("AAA")
+	e.user(&a, models.RoleDriver, "", "+919000000002")
+
+	mobile := "9000000002"
+	normalizedMobile := "+919000000002" // the form actually stored in otp_codes.mobile after validation
+	first := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"})
+	e.expect(first, 200, "")
+	code1, _ := first.data()["development_otp"].(string)
+	if len(code1) != 6 {
+		t.Fatalf("development_otp = %q, want a 6-digit code", code1)
+	}
+	for _, c := range code1 {
+		if c < '0' || c > '9' {
+			t.Fatalf("development_otp = %q, want digits only", code1)
+		}
+	}
+
+	// It is exactly the code /auth/otp/verify accepts - a wrong code first, to show both paths work.
+	wrong := e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": "driver", "code": "000000"})
+	e.expect(wrong, 401, "otp_invalid")
+	ok := e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": "driver", "code": code1})
+	e.expect(ok, 200, "")
+
+	// Single-use: the same code cannot be replayed after a successful verify.
+	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": "driver", "code": code1}), 401, "otp_invalid")
+
+	// A second send also returns a fresh, well-formed code. (That repeated sends are not all the
+	// *same* static value, across many numbers, is proven statistically by
+	// TestOTPGenerationIsRandomAndSecure - comparing just these two specific draws would be a test
+	// that incorrectly assumes two random 6-digit codes can never coincidentally collide.)
+	clearOTPCooldown(e, normalizedMobile)
+	second := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"})
+	e.expect(second, 200, "")
+	if code2, _ := second.data()["development_otp"].(string); len(code2) != 6 {
+		t.Fatalf("second development_otp = %q, want a fresh 6-digit code", code2)
+	}
+	// The cooldown and per-hour rate limit still apply exactly as before this feature.
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"}), 429, "otp_too_soon")
+
+	// An unregistered *parent* number gets the same response shape (development_otp present) so its
+	// mere presence/absence cannot be used to discover which numbers are registered - but the decoy
+	// value was never stored, so it never verifies. (Driver login's different, intentional behavior
+	// for an unregistered number is covered by TestSendOTPDriverNotRegistered.)
+	decoy := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9199999999", "app": "parent"})
+	e.expect(decoy, 200, "")
+	decoyCode, present := decoy.data()["development_otp"].(string)
+	if !present || len(decoyCode) != 6 {
+		t.Fatalf("unregistered number's response missing development_otp; want the same shape as a registered number")
+	}
+	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": "9199999999", "app": "parent", "code": decoyCode}), 401, "otp_invalid")
+
+	// Production never returns the code, regardless of any of the above.
+	e.api.IsProduction = true
+	defer func() { e.api.IsProduction = false }()
+	clearOTPCooldown(e, normalizedMobile)
+	prod := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"})
+	e.expect(prod, 200, "")
+	if _, present := prod.data()["development_otp"]; present {
+		t.Fatalf("development_otp must not be present when IsProduction is true; body=%v", prod.Body)
+	}
+}
+
+// TestSendOTPDriverNotRegistered covers the driver-only product decision: an unregistered or
+// inactive driver number gets 403 driver_not_registered and no OTP is ever created for it, while
+// an eligible active driver and parent logins of either registration state are unaffected.
+func TestSendOTPDriverNotRegistered(t *testing.T) {
+	e := newEnv(t)
+	a := e.school("AAA")
+	e.user(&a, models.RoleDriver, "", "+919000000003") // the one active, eligible driver
+
+	var otpCountBefore int
+	countOTPs := func(mobile string) int {
+		var n int
+		if err := e.pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM otp_codes WHERE mobile = $1 AND role = 'driver'`, mobile).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	// An unregistered driver number: 403, no OTP row created.
+	otpCountBefore = countOTPs("+919111111113")
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9111111113", "app": "driver"}), 403, "driver_not_registered")
+	if got := countOTPs("+919111111113"); got != otpCountBefore {
+		t.Fatalf("otp_codes rows for unregistered driver = %d, want %d (no OTP should be created)", got, otpCountBefore)
+	}
+
+	// A registered but inactive driver: same 403, no OTP row created, no account-status distinction leaked.
+	suspendedID := e.user(&a, models.RoleDriver, "", "+919000000004")
+	if _, err := e.pool.Exec(context.Background(), `UPDATE users SET status = $1 WHERE id = $2`, models.StatusSuspended, suspendedID); err != nil {
+		t.Fatal(err)
+	}
+	otpCountBefore = countOTPs("+919000000004")
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000004", "app": "driver"}), 403, "driver_not_registered")
+	if got := countOTPs("+919000000004"); got != otpCountBefore {
+		t.Fatalf("otp_codes rows for suspended driver = %d, want %d (no OTP should be created)", got, otpCountBefore)
+	}
+
+	// An eligible active driver is unaffected: still a normal 200 send.
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000003", "app": "driver"}), 200, "")
+
+	// An unregistered *parent* number is unaffected: still the enumeration-safe 200 (not 403).
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9222222222", "app": "parent"}), 200, "")
+}
+
+// TestOTPGenerationIsRandomAndSecure proves there is no static/hardcoded OTP anywhere in the
+// send/verify flow: every request gets its own fresh random code, a new code invalidates the
+// previous one, expired codes are rejected, and classic hardcoded placeholders never work.
+func TestOTPGenerationIsRandomAndSecure(t *testing.T) {
+	e := newEnv(t)
+	a := e.school("AAA")
+	e.user(&a, models.RoleDriver, "", "+919000000010")
+	// This test sends far more OTPs from one IP than the default 20/hour SMS-cost limit allows;
+	// raise it here so the assertions below are about OTP randomness, not that unrelated limit
+	// (which TestRateLimits already covers).
+	e.api.Limiter.Rules.OTPSendIP = ratelimit.Rule{Name: "otp_send_ip", Limit: 1000, Window: time.Hour}
+
+	// --- 1. Repeated requests generate different codes (statistical, not a brittle pairwise
+	// equality check: two independent 6-digit random draws can coincidentally collide about
+	// 1-in-a-million times, so asserting "code2 != code1" would occasionally and incorrectly fail).
+	// Across 20 distinct numbers (sidesteps the per-number cooldown), a static/hardcoded OTP would
+	// produce exactly 1 distinct value; real crypto/rand draws make more than one collision among
+	// 20 values astronomically unlikely.
+	seen := map[string]bool{}
+	for i := range 20 {
+		mobile := fmt.Sprintf("9300%06d", i)
+		r := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "parent"})
+		e.expect(r, 200, "")
+		code, _ := r.data()["development_otp"].(string)
+		if len(code) != 6 {
+			t.Fatalf("send %d: development_otp = %q, want a 6-digit code", i, code)
+		}
+		seen[code] = true
+	}
+	if len(seen) < 19 { // allow one coincidental collision out of 20, which is still extraordinarily unlikely
+		t.Fatalf("20 sends produced only %d distinct codes; OTP generation looks static, not random", len(seen))
+	}
+
+	// --- 2/3. A new code replaces the previous one: the old code stops working, the new one is
+	// exactly what verify accepts.
+	mobile := "9000000010"
+	send1 := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"})
+	e.expect(send1, 200, "")
+	code1, _ := send1.data()["development_otp"].(string)
+
+	clearOTPCooldown(e, "+919000000010")
+	send2 := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"})
+	e.expect(send2, 200, "")
+	code2, _ := send2.data()["development_otp"].(string)
+
+	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": "driver", "code": code1}), 401, "otp_invalid")
+	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": "driver", "code": code2}), 200, "")
+
+	// --- 4. An expired code is rejected even though it was never used or replaced.
+	clearOTPCooldown(e, "+919000000010")
+	send3 := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"})
+	e.expect(send3, 200, "")
+	code3, _ := send3.data()["development_otp"].(string)
+	if _, err := e.pool.Exec(context.Background(),
+		`UPDATE otp_codes SET expires_at = now() - interval '1 minute' WHERE mobile = $1 AND consumed_at IS NULL`,
+		"+919000000010"); err != nil {
+		t.Fatal(err)
+	}
+	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": "driver", "code": code3}), 401, "otp_invalid")
+
+	// --- 5. Classic hardcoded/placeholder codes are never accepted as a fallback, whatever the
+	// real generated code turned out to be.
+	clearOTPCooldown(e, "+919000000010")
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": "driver"}), 200, "")
+	for _, hardcoded := range []string{"123456", "12345", "111111", "000000", "1234"} {
+		e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": "driver", "code": hardcoded}), 401, "otp_invalid")
+	}
 }
 
 func TestSuperAdmin2FAAndSchools(t *testing.T) {

@@ -140,8 +140,20 @@ func (req *otpRequest) validate(withCode bool) *validate.V {
 	return v
 }
 
-// SendOTP sends a login code to a driver or parent. The response is the same
-// whether or not the number is registered, so numbers cannot be enumerated.
+// SendOTP sends a login code to a driver or parent.
+//
+// Product decision (intentional trade-off, not an oversight): for app=driver only, the response
+// tells the caller when a mobile number is not an eligible active driver (403 driver_not_registered),
+// instead of the enumeration-safe 200 decoy below. The Driver app has no self-service sign-up - every
+// driver account is created by school staff - so a driver mistyping their number, or trying before
+// staff has registered them, needs a clear "Invalid mobile number" error rather than being sent to an
+// OTP screen that can never succeed (it would always end in a confusing 401 on verify). The security
+// cost is real: this lets a caller enumerate which numbers are registered drivers for a school. It is
+// judged acceptable because (a) driver mobiles are operational contact numbers staff already know and
+// control, not secret, (b) the existing per-IP rate limit on this endpoint and the per-number cooldown
+// still throttle any enumeration attempt, and (c) the alternative - a dead-end OTP screen - was worse
+// for the actual users (drivers) this endpoint serves. Parent login is unchanged: it keeps the
+// enumeration-safe decoy response below, since parents were not part of this product decision.
 func (a *API) SendOTP(w http.ResponseWriter, r *http.Request) {
 	var req otpRequest
 	if !httpx.Decode(w, r, &req) {
@@ -171,6 +183,22 @@ func (a *API) SendOTP(w http.ResponseWriter, r *http.Request) {
 	sent := map[string]any{"sent": true, "expires_in": int(a.OTPTTL.Seconds())}
 	u, err := store.GetUserByMobile(ctx, a.Store.Pool, req.Mobile, role)
 	if errors.Is(err, store.ErrNotFound) || (u != nil && u.Status != models.StatusActive) {
+		if role == models.RoleDriver {
+			// See the SendOTP doc comment: driver login intentionally reveals this, trading
+			// anti-enumeration for a clear client-side error. No OTP is created either way.
+			httpx.Error(w, http.StatusForbidden, "driver_not_registered", "This mobile number is not registered as an active driver.")
+			return
+		}
+		// Parent (and any future app role): no OTP is created for this branch (nothing to verify
+		// against), but outside production the response must still carry a development_otp key -
+		// matching the registered-account branch below field-for-field - or its mere presence/absence
+		// would leak account existence. The decoy value is a fresh random code that was never stored,
+		// so it can never pass verification.
+		if !a.IsProduction {
+			if decoy, derr := auth.GenerateOTP(); derr == nil {
+				sent["development_otp"] = decoy
+			}
+		}
 		httpx.JSON(w, http.StatusOK, sent)
 		return
 	}
@@ -179,12 +207,13 @@ func (a *API) SendOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code := a.OTPDevCode
-	if code == "" {
-		if code, err = auth.GenerateOTP(); err != nil {
-			internalError(w, r, err)
-			return
-		}
+	// Always a fresh cryptographically secure random code (crypto/rand, see auth.GenerateOTP) -
+	// never a fixed or configured value. CreateOTP below also invalidates any earlier unused code
+	// for this mobile+role in the same statement, so only this new code can ever verify.
+	code, err := auth.GenerateOTP()
+	if err != nil {
+		internalError(w, r, err)
+		return
 	}
 	if err := store.CreateOTP(ctx, a.Store.Pool, req.Mobile, role, otpHash(req.Mobile, code), time.Now().Add(a.OTPTTL)); err != nil {
 		internalError(w, r, err)
@@ -193,6 +222,13 @@ func (a *API) SendOTP(w http.ResponseWriter, r *http.Request) {
 	if err := a.SMS.SendOTP(ctx, req.Mobile, code); err != nil {
 		internalError(w, r, err)
 		return
+	}
+	// Outside production only: lets a developer log in without a working SMS provider. This is
+	// exactly the code just hashed and stored above, so it is exactly what /auth/otp/verify accepts -
+	// never a fixed value, never read from .env or any configuration (this field merely echoes
+	// back the fresh random code this request just generated and stored).
+	if !a.IsProduction {
+		sent["development_otp"] = code
 	}
 	httpx.JSON(w, http.StatusOK, sent)
 }

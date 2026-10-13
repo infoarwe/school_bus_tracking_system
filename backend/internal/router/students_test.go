@@ -28,11 +28,17 @@ func (e *env) upload(path, token, csv string) resp {
 	return out
 }
 
-// otpLogin logs an app user in with the dev OTP.
+// otpLogin logs an app user in with the backend's freshly generated OTP, read from the
+// development_otp response field - never a fixed/static code.
 func (e *env) otpLogin(mobile, app string) string {
 	e.t.Helper()
-	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": app}), 200, "")
-	r := e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": app, "code": devOTP})
+	send := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": mobile, "app": app})
+	e.expect(send, 200, "")
+	code, _ := send.data()["development_otp"].(string)
+	if code == "" {
+		e.t.Fatalf("no development_otp in send response: %v", send.Body)
+	}
+	r := e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": mobile, "app": app, "code": code})
 	e.expect(r, 200, "")
 	return r.data()["access_token"].(string)
 }

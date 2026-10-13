@@ -45,8 +45,10 @@ type API struct {
 	Files        storage.Store
 	MaxLogoBytes int64
 
-	OTPTTL     time.Duration
-	OTPDevCode string
+	OTPTTL time.Duration
+	// IsProduction gates SendOTP's development_otp response field (outside production only).
+	// Set once at start-up from config.Config.IsProduction(); never a separate env var.
+	IsProduction bool
 	// RequireSuperAdmin2FA is reported to the client in /auth/me.
 	RequireSuperAdmin2FA bool
 }

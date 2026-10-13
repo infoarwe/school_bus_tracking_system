@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.12.2
+  version: 0.13.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -157,6 +157,20 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.13.0: **Permanent Morning/Evening route assignment** (additive): staff set a driver+bus+route
+      binding once (`GET/POST /schools/{id}/driver-assignments`, `GET/PUT .../{assignmentID}`,
+      `POST .../{assignmentID}/deactivate`) instead of creating a trip assignment every day. Daily trips
+      are unaffected - still exactly `Driver + Bus + Route + Date + Trip Type` - but `GET /driver/trips`
+      now auto-creates today's trip from the driver's current assignments if missing, idempotently, when
+      `date` is left at its default. No existing endpoint's request/response shape changed.
+    - 0.12.4: `POST /auth/otp/send` with `app: driver`: an unregistered or inactive driver number now gets
+      `403 driver_not_registered` instead of a 200 (intentional product decision, documented above - trades
+      anti-enumeration for a clear "Invalid mobile number" error instead of a dead-end OTP screen). `app: parent`
+      is unchanged and keeps the enumeration-safe 200 decoy.
+    - 0.12.3: `POST /auth/otp/send` response gains `development_otp` (additive), present only outside production:
+      the exact freshly-generated code this request just stored, so development/testing can log in without an
+      SMS provider. Never a fixed value, never read from `.env`; absent in production. No mobile-facing change
+      for production deployments.
     - 0.12.2: documentation only: pushes are token-based (no FCM topics); delay/breakdown pushes carry `delay_id`.
     - 0.12.1: web users manage their own account: `PATCH /auth/me` (display name) and `POST /auth/password`
       (current + new password; ends the user's other sessions). Admin web only; no mobile-facing change.
@@ -252,8 +266,24 @@ paths:
       tags: [Auth]
       summary: Send a login OTP (Driver / Parent app)
       description: |
-        Sends a 6-digit code by SMS, valid for `expires_in` seconds. The answer is the same whether or not
-        the number is registered. Limits: one request per 30 s and 5 per hour per number.
+        Sends a 6-digit code by SMS, valid for `expires_in` seconds. Limits: one request per 30 s and
+        5 per hour per number.
+
+        `app: parent`: the answer is the same whether or not the number is registered, so numbers
+        cannot be enumerated.
+
+        `app: driver`: **intentional product decision, not anti-enumeration** - since drivers have no
+        self-service sign-up (school staff register every driver), a number that isn't an eligible
+        active driver gets `403 driver_not_registered` instead of a 200, so the app can show "Invalid
+        mobile number" immediately rather than sending the driver to an OTP screen that can never
+        succeed. This does let a caller discover which numbers are registered drivers for a school;
+        the per-IP and per-number limits above still throttle that. Parent numbers are not affected.
+
+        Outside production only, a 200 response also carries `development_otp`: the exact code this
+        request just generated and stored, so a developer can log in without a working SMS provider.
+        It is never a fixed value and never read from configuration - each request generates a fresh
+        code. For `app: parent`, it is present for an unregistered number too (a decoy that was never
+        stored, so it can never verify), so its presence never reveals whether that number is registered.
       operationId: sendOtp
       security: []
       requestBody:
@@ -279,8 +309,17 @@ paths:
                     properties:
                       sent: { type: boolean }
                       expires_in: { type: integer, description: seconds }
-              example: { data: { sent: true, expires_in: 300 } }
+                      development_otp:
+                        type: string
+                        description: Outside production only; see above. Absent in production.
+              example: { data: { sent: true, expires_in: 300, development_otp: "482913" } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403":
+          description: "`app: driver` only: the number is not an eligible active driver. See the description above."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: { code: driver_not_registered, message: This mobile number is not registered as an active driver. } }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /api/v1/auth/otp/verify:
@@ -921,6 +960,109 @@ paths:
           content:
             application/json:
               schema: { type: object, properties: { data: { $ref: "#/components/schemas/Driver" } } }
+
+  /api/v1/schools/{schoolID}/driver-assignments:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Driver Assignments]
+      summary: List current permanent route assignments
+      description: Current (not yet deactivated or replaced) Morning/Evening assignments.
+      operationId: listDriverAssignments
+      parameters:
+        - { name: driver_id, in: query, description: Filter to one driver., schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Assignments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/DriverRouteAssignment" } }
+    post:
+      tags: [Driver Assignments]
+      summary: Create a permanent route assignment
+      description: |
+        Permanently binds a driver and bus to a route for Morning Pickup or Evening Drop.
+        Creates no trip itself - `GET /driver/trips` materializes each school day's trip
+        from it lazily. The route, bus and driver must each hold at most one current
+        assignment for this trip type (`409 assignment_conflict` otherwise); for
+        `evening_drop` the route's Evening Drop stop order must be fully configured.
+      operationId: createDriverAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DriverRouteAssignmentInput" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverRouteAssignment" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409":
+          description: Another current assignment already holds this route, bus or driver for this trip type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: { code: assignment_conflict, message: This route already has a current permanent assignment for this trip type., fields: { route_id: "..." } } }
+
+  /api/v1/schools/{schoolID}/driver-assignments/{assignmentID}:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: assignmentID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Driver Assignments]
+      summary: Get a permanent route assignment
+      operationId: getDriverAssignment
+      responses:
+        "200":
+          description: The assignment.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverRouteAssignment" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Driver Assignments]
+      summary: Change a permanent route assignment
+      description: |
+        Ends the current row and creates a new one with the given driver/bus/route (history
+        preserved, never mutated in place). Trips already materialized under the old
+        assignment are unaffected.
+      operationId: updateDriverAssignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DriverRouteAssignmentInput" }
+      responses:
+        "200":
+          description: Updated (a new assignment row; the old one is now history).
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/DriverRouteAssignment" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Another current assignment already holds this route, bus or driver for this trip type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/schools/{schoolID}/driver-assignments/{assignmentID}/deactivate:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { name: assignmentID, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Driver Assignments]
+      summary: Deactivate a permanent route assignment
+      description: Ends the current row with no replacement. Historical trips already created from it are unaffected.
+      operationId: deactivateDriverAssignment
+      responses:
+        "204": { description: Deactivated. }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/schools/{schoolID}/buses:
     parameters:
@@ -1672,6 +1814,11 @@ paths:
         The logged-in driver's own trips for `date` (default: today in the school's time zone), Morning Pickup first.
         Cancelled trips are not listed. Each trip includes the route's ordered `stops`, each with `student_count`
         (how many students board there for Morning Pickup, or get off for Evening Drop). Drivers never get student names.
+
+        When `date` is omitted (today's default), this first creates a trip for each of the driver's current
+        permanent route assignments (Driver Assignments) that doesn't already have one - idempotent, so refreshing
+        never creates a duplicate and a trip already in any status (even completed) is left untouched. Browsing a
+        different `date` never creates a trip there.
 
         **Trip status flow for the Driver app:** `scheduled` → **confirm** → `confirmed` → **start** (only on the trip's
         date) → `started` → **end** → `completed`. A trip can also become `cancelled` by the school at any time before
@@ -3601,6 +3748,46 @@ components:
             last_login_at: { type: [string, "null"], format: date-time }
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
+    DriverRouteAssignmentInput:
+      type: object
+      required: [route_id, trip_type, driver_id, bus_id]
+      properties:
+        route_id: { type: string, format: uuid }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        driver_id: { type: string, format: uuid }
+        bus_id: { type: string, format: uuid }
+    DriverRouteAssignment:
+      description: |
+        A permanent Morning Pickup or Evening Drop driver+bus+route binding, set once by
+        staff. It never starts or tracks a trip itself: `GET /driver/trips` materializes it
+        into a normal daily trip for each school day, so this record stays unchanged by
+        anything that happens to that trip (status, GPS, history) until staff change or
+        deactivate it here.
+      type: object
+      required: [id, school_id, trip_type, route, bus, driver, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        school_id: { type: string, format: uuid }
+        trip_type: { type: string, enum: [morning_pickup, evening_drop] }
+        route:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            code: { type: string }
+            name: { type: string }
+        bus:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            vehicle_number: { type: string }
+        driver:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            mobile: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     BusInput:
       type: object
       required: [vehicle_number, capacity]

@@ -724,7 +724,8 @@ func (a *API) DriverTrips(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	date := r.URL.Query().Get("date")
-	if date == "" {
+	isToday := date == ""
+	if isToday {
 		var err error
 		if date, err = store.SchoolToday(ctx, a.Store.Pool, d.SchoolID); err != nil {
 			internalError(w, r, err)
@@ -733,6 +734,17 @@ func (a *API) DriverTrips(w http.ResponseWriter, r *http.Request) {
 	} else if _, err := time.Parse(time.DateOnly, date); err != nil {
 		httpx.ValidationError(w, validate.Errors{"date": "must be a date YYYY-MM-DD"})
 		return
+	}
+	// Only for today's default (no ?date= override): materialize a trips row from any of the
+	// driver's current permanent assignments that don't have one yet (store.EnsureDriverDailyTrips).
+	// Browsing another date never speculatively creates a trip there.
+	if isToday {
+		if err := a.Store.InTx(ctx, func(q store.DBTX) error {
+			return store.EnsureDriverDailyTrips(ctx, q, d.SchoolID, d.ID, date)
+		}); err != nil {
+			internalError(w, r, err)
+			return
+		}
 	}
 	trips, err := store.DriverTripsOn(ctx, a.Store.Pool, d.ID, date)
 	if err != nil {

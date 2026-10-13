@@ -121,7 +121,8 @@ func run() error {
 		}
 	}
 
-	fmt.Printf("\nWeb logins use password %q. Driver/parent apps log in with OTP (set OTP_DEV_CODE for a fixed code).\n", demoPassword)
+	fmt.Printf("\nWeb logins use password %q. Driver/parent apps log in with OTP: outside production, "+
+		"POST /auth/otp/send's response includes the real freshly generated code as development_otp.\n", demoPassword)
 	return nil
 }
 

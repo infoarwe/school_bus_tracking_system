@@ -53,8 +53,10 @@ func TestTransportTenantIsolation(t *testing.T) {
 	}
 
 	// Drivers and parents have no access to admin master data, even in their own school.
-	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000001", "app": "driver"}), 200, "")
-	login := e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": "9000000001", "app": "driver", "code": devOTP})
+	send := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000001", "app": "driver"})
+	e.expect(send, 200, "")
+	code, _ := send.data()["development_otp"].(string)
+	login := e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": "9000000001", "app": "driver", "code": code})
 	e.expect(login, 200, "")
 	e.expect(e.do("GET", base+"/buses", login.data()["access_token"].(string), nil), 403, "forbidden")
 }
@@ -80,18 +82,20 @@ func TestDriverLoginLifecycle(t *testing.T) {
 	e.expect(e.do("POST", base, admin, map[string]any{"name": "", "mobile": "123", "license_expiry": "31-01-2030"}), 400, "validation_failed")
 
 	otpLogin := func() resp {
-		e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000001", "app": "driver"})
+		send := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000001", "app": "driver"})
+		code, _ := send.data()["development_otp"].(string)
 		_, _ = e.pool.Exec(t.Context(), `UPDATE otp_codes SET created_at = created_at - interval '1 minute'`) // skip the 30 s wait
-		return e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": "9000000001", "app": "driver", "code": devOTP})
+		return e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": "9000000001", "app": "driver", "code": code})
 	}
 	first := otpLogin()
 	e.expect(first, 200, "")
 	tok := first.data()["access_token"].(string)
 
-	// Suspending the driver ends their sessions and blocks new logins.
+	// Suspending the driver ends their sessions and blocks new logins. The send itself is now
+	// rejected outright (driver_not_registered) - there is no OTP to verify against a suspended account.
 	e.expect(e.do("PATCH", base+"/"+id+"/status", admin, map[string]string{"status": "suspended"}), 200, "")
 	e.expect(e.do("GET", "/api/v1/auth/me", tok, nil), 401, "session_revoked")
-	e.expect(otpLogin(), 401, "otp_invalid")
+	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000001", "app": "driver"}), 403, "driver_not_registered")
 
 	// Reactivating restores login. Editing the mobile changes the login number.
 	e.expect(e.do("PATCH", base+"/"+id+"/status", admin, map[string]string{"status": "active"}), 200, "")

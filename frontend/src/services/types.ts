@@ -119,6 +119,27 @@ export interface Driver extends DriverInput {
   updated_at: string
 }
 
+/** A permanent Morning Pickup / Evening Drop driver+bus+route binding, set once by staff.
+ * Never starts or tracks a trip itself - GET /driver/trips materializes it into a normal
+ * trip each school day. */
+export interface DriverRouteAssignmentInput {
+  route_id: string
+  trip_type: 'morning_pickup' | 'evening_drop'
+  driver_id: string
+  bus_id: string
+}
+
+export interface DriverRouteAssignment {
+  id: string
+  school_id: string
+  trip_type: 'morning_pickup' | 'evening_drop'
+  route: { id: string; code: string; name: string }
+  bus: { id: string; vehicle_number: string }
+  driver: { id: string; name: string; mobile: string }
+  created_at: string
+  updated_at: string
+}
+
 export type BusStatus = 'active' | 'inactive' | 'maintenance'
 
 export interface BusInput {

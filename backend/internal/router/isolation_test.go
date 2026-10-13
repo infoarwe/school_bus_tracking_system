@@ -55,6 +55,8 @@ func newTenant(e *env, code string, n int) *tenant {
 	t.ids["busID"] = create("/buses", map[string]any{"vehicle_number": "TN-38-" + code + "-1234", "capacity": 40})
 	driverMobile := fmt.Sprintf("9%d00000001", n)
 	t.ids["driverID"] = create("/drivers", map[string]any{"name": "Driver " + code, "mobile": driverMobile})
+	t.ids["assignmentID"] = create("/driver-assignments", map[string]any{"route_id": t.ids["routeID"],
+		"trip_type": "morning_pickup", "driver_id": t.ids["driverID"], "bus_id": t.ids["busID"]})
 	t.ids["studentID"] = create("/students", map[string]any{"admission_no": code + "-1", "name": "Child " + code})
 	e.expect(e.do("PUT", t.base+"/students/"+t.ids["studentID"]+"/assignment", admin, map[string]any{
 		"route_id": t.ids["routeID"], "pickup_stop_id": t.stops[1], "drop_stop_id": t.stops[1]}), 200, "")
@@ -241,7 +243,8 @@ func TestTenantIsolationAllEndpoints(t *testing.T) {
 	// Current representations of B's records (valid PUT bodies), fetched before the snapshot.
 	reps := map[string]map[string]any{}
 	for param, kind := range map[string]string{"userID": "users", "driverID": "drivers", "busID": "buses",
-		"routeID": "routes", "studentID": "students", "parentID": "parents", "tripID": "trips"} {
+		"routeID": "routes", "studentID": "students", "parentID": "parents", "tripID": "trips",
+		"assignmentID": "driver-assignments"} {
 		r := e.do("GET", b.base+"/"+kind+"/"+b.ids[param], b.tokens[models.RoleSchoolAdmin], nil)
 		e.expect(r, 200, "")
 		reps[param] = r.data()

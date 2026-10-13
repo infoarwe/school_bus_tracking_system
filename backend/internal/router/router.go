@@ -212,6 +212,14 @@ func New(d Deps) http.Handler {
 						r.Delete("/routes/{routeID}/stops/{stopID}", a.DeleteStop)
 						r.Get("/routes/{routeID}/students", a.RouteStudents)
 
+						// Permanent Morning/Evening route assignment: set once, materialized daily
+						// into trips by GET /driver/trips (store.EnsureDriverDailyTrips).
+						r.Get("/driver-assignments", a.ListDriverAssignments)
+						r.Post("/driver-assignments", a.CreateDriverAssignment)
+						r.Get("/driver-assignments/{assignmentID}", a.GetDriverAssignment)
+						r.Put("/driver-assignments/{assignmentID}", a.UpdateDriverAssignment)
+						r.Post("/driver-assignments/{assignmentID}/deactivate", a.DeactivateDriverAssignment)
+
 						// Read-only for Transport Managers (student data limited to transport needs).
 						r.Get("/students", a.ListStudents)
 						r.Get("/students/classes", a.StudentClasses)

@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { App, Button, Col, Dropdown, Flex, Form, Input, Modal, Row, Space, Table, Tag } from 'antd'
 import { DownOutlined, PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
@@ -115,6 +115,9 @@ function Drivers({ schoolId }: { schoolId: string }) {
                 <Button size="small" onClick={() => setEditing(d)}>
                   Edit
                 </Button>
+                <Link to={`/driver-assignments?driver_id=${d.id}`}>
+                  <Button size="small">Assignments</Button>
+                </Link>
                 <Dropdown
                   menu={{
                     items: STATUSES.filter((s) => s !== d.status).map((s) => ({

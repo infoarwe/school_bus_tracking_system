@@ -7,6 +7,7 @@ import AnnouncementsPage from '../pages/AnnouncementsPage'
 import AuditLogsPage from '../pages/AuditLogsPage'
 import BusesPage from '../pages/BusesPage'
 import DashboardPage from '../pages/DashboardPage'
+import DriverAssignmentsPage from '../pages/DriverAssignmentsPage'
 import DriversPage from '../pages/DriversPage'
 import ErrorPage from '../pages/ErrorPage'
 import LiveTrackingPage from '../pages/LiveTrackingPage'
@@ -32,6 +33,7 @@ const pages: Record<string, React.ReactNode> = {
   '/schools': <SchoolsPage />,
   '/users': <UsersPage />,
   '/drivers': <DriversPage />,
+  '/driver-assignments': <DriverAssignmentsPage />,
   '/buses': <BusesPage />,
   '/routes': <RoutesPage />,
   '/students': <StudentsPage />,

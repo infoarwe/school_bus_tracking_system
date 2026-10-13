@@ -298,3 +298,29 @@ type TripStatusChange struct {
 	Reason        string    `json:"reason"`
 	CreatedAt     time.Time `json:"created_at"`
 }
+
+// DriverRouteAssignment is a permanent Morning Pickup or Evening Drop driver+bus+route
+// binding, set once by staff. It never starts or tracks a trip itself - GET /driver/trips
+// materializes it into a normal trips row for each school day (store.EnsureDriverDailyTrips),
+// so the daily trip lifecycle (status, GPS, history) is completely unaffected by this table.
+type DriverRouteAssignment struct {
+	ID       string `json:"id"`
+	SchoolID string `json:"school_id"`
+	TripType string `json:"trip_type"` // morning_pickup | evening_drop
+	Route    struct {
+		ID   string `json:"id"`
+		Code string `json:"code"`
+		Name string `json:"name"`
+	} `json:"route"`
+	Bus struct {
+		ID            string `json:"id"`
+		VehicleNumber string `json:"vehicle_number"`
+	} `json:"bus"`
+	Driver struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Mobile string `json:"mobile"`
+	} `json:"driver"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}

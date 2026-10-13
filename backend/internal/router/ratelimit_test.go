@@ -50,12 +50,15 @@ func TestRateLimits(t *testing.T) {
 
 	// Per mobile: OTP verify attempts, however the number is written.
 	rules.OTPVerifyMobile = ratelimit.Rule{Name: "otp_verify_mobile", Limit: 2, Window: 15 * time.Minute}
-	e.expect(e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000201", "app": "driver"}), 200, "")
+	send := e.do("POST", "/api/v1/auth/otp/send", "", map[string]string{"mobile": "9000000201", "app": "driver"})
+	e.expect(send, 200, "")
+	code, _ := send.data()["development_otp"].(string)
 	bad := map[string]string{"mobile": "9000000201", "app": "driver", "code": "000000"}
 	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", bad), 401, "otp_invalid")
 	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", bad), 401, "otp_invalid")
+	// Even the correct, freshly generated code is blocked once the per-mobile verify limit is hit.
 	e.expect(e.do("POST", "/api/v1/auth/otp/verify", "", map[string]string{"mobile": "+91 90000 00201",
-		"app": "driver", "code": devOTP}), 429, "rate_limited")
+		"app": "driver", "code": code}), 429, "rate_limited")
 
 	// Per IP: OTP sends (SMS cost), even to unregistered numbers.
 	rules.OTPSendIP = ratelimit.Rule{Name: "otp_send_ip", Limit: 2, Window: time.Hour}

@@ -28,7 +28,6 @@ type Config struct {
 	AccessTokenTTL       time.Duration
 	RefreshTokenTTL      time.Duration
 	OTPTTL               time.Duration
-	OTPDevCode           string // fixed OTP for dev/testing; refused in production
 	RequireSuperAdmin2FA bool
 
 	// DataEncryptionKey (64 hex chars) encrypts stored third-party secrets such as
@@ -115,7 +114,6 @@ func Load() (*Config, error) {
 		AccessTokenTTL:       duration("ACCESS_TOKEN_TTL", "15m"),
 		RefreshTokenTTL:      duration("REFRESH_TOKEN_TTL", "720h"),
 		OTPTTL:               duration("OTP_TTL", "5m"),
-		OTPDevCode:           get("OTP_DEV_CODE", ""),
 		RequireSuperAdmin2FA: boolean("REQUIRE_SUPER_ADMIN_2FA", true),
 		DataEncryptionKey:    get("DATA_ENCRYPTION_KEY", ""),
 		FCMCredentialsFile:   fcmCredentialsFile(),
@@ -165,9 +163,6 @@ func (c *Config) ValidateForAPI() error {
 	}
 	if c.IsProduction() && c.DataEncryptionKey == strings.Repeat("0", 64) {
 		return fmt.Errorf("config: set a real DATA_ENCRYPTION_KEY in production")
-	}
-	if c.IsProduction() && c.OTPDevCode != "" {
-		return fmt.Errorf("config: OTP_DEV_CODE must not be set in production")
 	}
 	if c.IsProduction() && !c.RequireSuperAdmin2FA {
 		return fmt.Errorf("config: REQUIRE_SUPER_ADMIN_2FA cannot be disabled in production")

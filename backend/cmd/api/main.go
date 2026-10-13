@@ -49,9 +49,6 @@ func run() error {
 		return err
 	}
 	setupLogger(cfg)
-	if cfg.OTPDevCode != "" {
-		slog.Warn("OTP_DEV_CODE is set: every OTP sent is this fixed code (development only)")
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -125,7 +122,7 @@ func run() error {
 		Files:                files,
 		MaxLogoBytes:         cfg.MaxLogoBytes,
 		OTPTTL:               cfg.OTPTTL,
-		OTPDevCode:           cfg.OTPDevCode,
+		IsProduction:         cfg.IsProduction(),
 		RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
 	}
 	go jobs.Announcements(ctx, 30*time.Second, api.SendDueAnnouncements)

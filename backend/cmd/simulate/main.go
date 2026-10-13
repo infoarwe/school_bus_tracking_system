@@ -6,7 +6,8 @@
 //	go run ./cmd/simulate -speed 60 -interval 2s -end
 //	go run ./cmd/simulate -mobile 9000000005 -trip <trip-id> -noise
 //
-// Needs OTP_DEV_CODE on the API (dev/staging only).
+// Login reads the real, freshly generated OTP from POST /auth/otp/send's development_otp
+// response field - present only outside production (dev/staging only); never a fixed code.
 package main
 
 import (
@@ -47,7 +48,6 @@ type trip struct {
 func main() {
 	api := flag.String("api", "http://localhost:8085", "API base URL")
 	mobile := flag.String("mobile", "9000000001", "driver mobile number")
-	otp := flag.String("otp", "123456", "OTP (the API's OTP_DEV_CODE)")
 	tripID := flag.String("trip", "", "trip ID (default: today's first trip that is not finished)")
 	speedKmh := flag.Float64("speed", 30, "bus speed in km/h")
 	interval := flag.Duration("interval", 3*time.Second, "time between GPS points")
@@ -57,7 +57,7 @@ func main() {
 	flag.Parse()
 
 	c := &client{base: *api + "/api/v1"}
-	if err := c.login(*mobile, *otp); err != nil {
+	if err := c.login(*mobile); err != nil {
 		log.Fatalf("login: %v", err)
 	}
 
@@ -165,18 +165,22 @@ type client struct {
 	access, refresh string
 }
 
-func (c *client) login(mobile, otp string) error {
-	if err := c.do("POST", "/auth/otp/send", map[string]string{"mobile": mobile, "app": "driver"}, nil); err != nil {
-		var ae *apiError
-		if !errors.As(err, &ae) || ae.Code != "otp_too_soon" { // a code from a previous run is still valid
-			return err
-		}
+func (c *client) login(mobile string) error {
+	var sent struct {
+		DevelopmentOTP string `json:"development_otp"`
+	}
+	if err := c.do("POST", "/auth/otp/send", map[string]string{"mobile": mobile, "app": "driver"}, &sent); err != nil {
+		return fmt.Errorf("send otp: %w", err)
+	}
+	if sent.DevelopmentOTP == "" {
+		return errors.New("no development_otp in the send response - this tool needs the API running outside production (APP_ENV != production)")
 	}
 	var tok struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := c.do("POST", "/auth/otp/verify", map[string]string{"mobile": mobile, "app": "driver", "code": otp, "device_name": "GPS simulator"}, &tok); err != nil {
+	body := map[string]string{"mobile": mobile, "app": "driver", "code": sent.DevelopmentOTP, "device_name": "GPS simulator"}
+	if err := c.do("POST", "/auth/otp/verify", body, &tok); err != nil {
 		return err
 	}
 	c.access, c.refresh = tok.AccessToken, tok.RefreshToken
