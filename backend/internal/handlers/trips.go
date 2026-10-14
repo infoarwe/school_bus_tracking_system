@@ -256,6 +256,9 @@ func (a *API) publishTripStatus(r *http.Request, t *models.Trip) {
 	if err := a.notifyTripStatus(r.Context(), t); err != nil {
 		internalErrorLog(r, err)
 	}
+	if t.Status == models.TripCompleted {
+		a.snapshotRouteLater(t)
+	}
 }
 
 // --- Admin web: /schools/{schoolID}/trips ---

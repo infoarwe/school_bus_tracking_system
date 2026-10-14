@@ -1,6 +1,8 @@
-import { getData, getPage, send } from './api'
+import { api, getData, getPage, send } from './api'
 import type {
   CopyTripsResult,
+  PlannedPath,
+  RouteSnapshot,
   Trip,
   TripDetail,
   TripInput,
@@ -16,6 +18,17 @@ export const tripsApi = {
   get: (schoolId: string, id: string) => getData<TripDetail>(`${base(schoolId)}/${id}`),
   progress: (schoolId: string, id: string) =>
     getData<TripProgressResponse>(`${base(schoolId)}/${id}/progress`),
+  plannedPath: (schoolId: string, id: string) =>
+    getData<PlannedPath>(`${base(schoolId)}/${id}/planned-path`),
+  routeSnapshot: (schoolId: string, id: string) =>
+    getData<RouteSnapshot>(`${base(schoolId)}/${id}/route-snapshot`),
+  makeRouteSnapshot: (schoolId: string, id: string) =>
+    send<RouteSnapshot>('post', `${base(schoolId)}/${id}/route-snapshot`),
+  /** The PNG, fetched with the access token (an <img src> cannot send it). */
+  routeSnapshotImage: (schoolId: string, id: string) =>
+    api
+      .get<Blob>(`${base(schoolId)}/${id}/route-snapshot/image`, { responseType: 'blob' })
+      .then((res) => res.data),
   create: (schoolId: string, input: TripInput) => send<Trip>('post', base(schoolId), input),
   update: (schoolId: string, id: string, input: TripInput) =>
     send<Trip>('put', `${base(schoolId)}/${id}`, input),

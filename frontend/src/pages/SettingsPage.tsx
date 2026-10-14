@@ -177,9 +177,21 @@ function MapsSettingsCard({ schoolId }: { schoolId: string }) {
   )
 }
 
+/** What the Google ETA interval means for live ETAs and for the Google bill. */
+function GoogleEtaHelp({ seconds }: { seconds: number | null | undefined }) {
+  const base =
+    'Live ETAs follow the bus on every GPS update; Google (with traffic) corrects them at this interval, per trip in progress. Each correction is one billed Google Routes call.'
+  if (seconds == null) return base
+  if (seconds === 0) return `${base} 0 = off: our own estimate only, no Google cost.`
+  if (seconds < 5) return base
+  const perHour = Math.ceil(3600 / seconds)
+  return `${base} Now: about ${perHour} call${perHour === 1 ? '' : 's'} per 1-hour trip. 300 (5 min) is a good balance; 0 turns it off.`
+}
+
 function TrackingSettingsCard({ schoolId }: { schoolId: string }) {
   const { message } = App.useApp()
   const [form] = Form.useForm<TrackingSettings>()
+  const googleEtaSeconds = Form.useWatch('google_eta_refresh_seconds', form)
   const loadTracking = useCallback(() => trackingSettingsApi.get(schoolId), [schoolId])
   const { data: current, setData: setCurrent, error: loadError, retry } = useLoad(loadTracking)
   const [saving, setSaving] = useState(false)
@@ -247,6 +259,22 @@ function TrackingSettingsCard({ schoolId }: { schoolId: string }) {
             rules={[{ required: true }]}
           >
             <InputNumber min={100} max={5000} step={100} style={{ width: 160 }} />
+          </Form.Item>
+          <Form.Item
+            name="google_eta_refresh_seconds"
+            label="Correct live ETA with Google every (seconds)"
+            extra={<GoogleEtaHelp seconds={googleEtaSeconds} />}
+            rules={[
+              { required: true },
+              {
+                validator: (_, v: number | null) =>
+                  v == null || v === 0 || (v >= 5 && v <= 3600)
+                    ? Promise.resolve()
+                    : Promise.reject(new Error('Enter 0 (off) or 5 to 3600 seconds.')),
+              },
+            ]}
+          >
+            <InputNumber min={0} max={3600} step={60} style={{ width: 160 }} />
           </Form.Item>
           <Form.Item
             label="School location"

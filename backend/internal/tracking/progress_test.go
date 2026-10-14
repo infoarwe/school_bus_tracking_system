@@ -154,11 +154,13 @@ func TestLookAheadIsLimited(t *testing.T) {
 }
 
 func TestETAEstimate(t *testing.T) {
+	every := 5 * time.Minute // the school's google_eta_refresh_seconds
+	maxAge := GoogleMaxAge(every)
 	d := newDriver(t)
 	speed := 8.0
 	d.p.Apply(Point{Latitude: 11.000, Longitude: 77.0, AccuracyM: 10, SpeedMPS: &speed, RecordedAt: d.at}, d.cfg)
 	now := d.at
-	d.p.UpdateETAs(now, nil)
+	d.p.UpdateETAs(now, nil, maxAge)
 	if d.p.ETASource != ETASourceEstimate {
 		t.Fatalf("source = %s", d.p.ETASource)
 	}
@@ -171,36 +173,68 @@ func TestETAEstimate(t *testing.T) {
 		t.Errorf("B should be later than A plus dwell: %d vs %d", *b.ETASeconds, *a.ETASeconds)
 	}
 
-	// A fresh Google result for the same stops wins, minus the time since it was computed.
+	// A Google answer calibrates the estimate: here Google says twice our estimate
+	// (traffic), so every ETA ahead doubles, and keeps following the bus.
 	pending := d.p.Pending()
 	g := &GoogleETA{ComputedAt: now.Add(-30 * time.Second)}
-	for i, s := range pending {
+	estA := *a.ETASeconds
+	for _, s := range pending {
 		g.StopIDs = append(g.StopIDs, s.StopID)
-		g.CumSeconds = append(g.CumSeconds, 300*(i+1))
-		g.CumMeters = append(g.CumMeters, 2000*(i+1))
 	}
-	if d.p.NeedsGoogleRefresh(now, g) {
+	g.Calibrate(*d.p.LastPoint, speed, pending)
+	for i := range g.EstSeconds {
+		g.CumSeconds = append(g.CumSeconds, 2*g.EstSeconds[i])
+		g.CumMeters = append(g.CumMeters, g.EstMeters[i])
+	}
+	if d.p.NeedsGoogleRefresh(now, g, every) {
 		t.Error("a 30 s old result for the same stops is fresh enough")
 	}
-	d.p.UpdateETAs(now, g)
-	if d.p.ETASource != ETASourceGoogle || *d.p.Stop("A").ETASeconds != 270 {
-		t.Errorf("google eta = %s %d", d.p.ETASource, *d.p.Stop("A").ETASeconds)
+	d.p.UpdateETAs(now, g, maxAge)
+	if got := *d.p.Stop("A").ETASeconds; d.p.ETASource != ETASourceGoogle || got < 2*estA-2 || got > 2*estA+2 {
+		t.Errorf("google eta = %s %d, want ~%d", d.p.ETASource, got, 2*estA)
 	}
-	// Too old: back to the estimate.
-	d.p.UpdateETAs(now.Add(5*time.Minute), g)
+	// Refreshed only every school interval (billing), used up to two intervals.
+	if d.p.NeedsGoogleRefresh(now.Add(4*time.Minute), g, every) || !d.p.NeedsGoogleRefresh(now.Add(5*time.Minute), g, every) {
+		t.Error("refresh should be due after 5 minutes, not before")
+	}
+	d.p.UpdateETAs(now.Add(11*time.Minute), g, maxAge)
 	if d.p.ETASource != ETASourceEstimate {
-		t.Error("stale Google result must not be used")
+		t.Error("a result older than two intervals must not be used")
+	}
+	// Google ETA switched off for the school (0): never asked, never used.
+	if d.p.NeedsGoogleRefresh(now.Add(time.Hour), nil, 0) {
+		t.Error("Google ETA off: no refresh")
+	}
+	d.p.UpdateETAs(now, g, GoogleMaxAge(0))
+	if d.p.ETASource != ETASourceEstimate {
+		t.Error("Google ETA off: the estimate must be used")
+	}
+	// An answer without calibration (cached before this change) is not used.
+	d.p.UpdateETAs(now, &GoogleETA{ComputedAt: now, StopIDs: g.StopIDs, CumSeconds: g.CumSeconds, CumMeters: g.CumMeters}, maxAge)
+	if d.p.ETASource != ETASourceEstimate {
+		t.Error("uncalibrated result must fall back to the estimate")
 	}
 
 	// Reached stops have no ETA.
 	d.fix(11.0100, 10)
 	d.fix(11.0100, 10)
-	d.p.UpdateETAs(d.at, nil)
+	d.p.UpdateETAs(d.at, nil, maxAge)
 	if d.p.Stop("A").ETASeconds != nil || d.p.Stop("B").ETASeconds == nil {
 		t.Error("reached stop should have no ETA; next stop should")
 	}
-	if !d.p.NeedsGoogleRefresh(d.at, g) {
-		t.Error("stops ahead changed: Google result must be refreshed")
+	// Passing a stop needs no new Google call: the answer still covers the stops ahead.
+	if d.p.NeedsGoogleRefresh(now.Add(time.Minute), g, every) {
+		t.Error("passing a stop must not trigger a Google call")
+	}
+	d.p.UpdateETAs(now.Add(time.Minute), g, maxAge)
+	if d.p.ETASource != ETASourceGoogle || d.p.Stop("B").ETASeconds == nil {
+		t.Error("after passing A, the answer should still calibrate B")
+	}
+	// A different set of stops (route changed) does.
+	other := &GoogleETA{ComputedAt: now, StopIDs: []string{"X"}, CumSeconds: []int{1}, CumMeters: []int{1},
+		EstSeconds: []int{1}, EstMeters: []int{1}}
+	if !d.p.NeedsGoogleRefresh(now, other, every) {
+		t.Error("stops that do not fit the answer must trigger a refresh")
 	}
 }
 

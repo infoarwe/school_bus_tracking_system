@@ -597,6 +597,28 @@ export interface AuditRow {
   created_at: string
 }
 
+/** GET /trips/{id}/planned-path: google follows the roads, straight joins the stops. */
+export interface PlannedPath {
+  source: 'google' | 'straight'
+  points: { latitude: number; longitude: number }[]
+}
+
+/** Travelled route saved when a trip is completed (GET /trips/{id}/route-snapshot). */
+export interface RouteSnapshot {
+  trip_id: string
+  status: 'ready' | 'no_gps' | 'failed'
+  has_image: boolean
+  /** Google encoded polyline of the travelled path. */
+  polyline: string
+  distance_m: number
+  point_count: number
+  started_at: string | null
+  ended_at: string | null
+  /** Why there is no image (empty when ready). */
+  error: string
+  updated_at: string
+}
+
 export interface TrackPoint {
   latitude: number
   longitude: number

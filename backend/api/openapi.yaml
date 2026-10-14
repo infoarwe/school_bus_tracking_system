@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.13.0
+  version: 0.16.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -157,6 +157,12 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.16.0: Settings → Live tracking: `google_eta_refresh_seconds` (default 300, 0 = off, else 5–3600 s). Google ETA is no
+      longer asked every minute nor at every stop; ETAs still update on every fix (additive, no app change).
+    - 0.15.0: Travelled-route snapshot of completed trips (admin web, additive): `GET/POST
+      /schools/{id}/trips/{tripID}/route-snapshot` and `.../route-snapshot/image` (PNG).
+    - 0.14.0: `GET /schools/{id}/trips/{tripID}/planned-path` (admin web, additive): the planned road path of a
+      trip (Google Routes with the school's server key, else straight lines between stops).
     - 0.13.0: **Permanent Morning/Evening route assignment** (additive): staff set a driver+bus+route
       binding once (`GET/POST /schools/{id}/driver-assignments`, `GET/PUT .../{assignmentID}`,
       `POST .../{assignmentID}/deactivate`) instead of creating a trip assignment every day. Daily trips
@@ -3104,6 +3110,124 @@ paths:
                         speed_mps: { type: [number, "null"] }
                         recorded_at: { type: string, format: date-time }
 
+  /api/v1/schools/{schoolID}/trips/{tripID}/planned-path:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Trips]
+      summary: Planned road path of a trip (live map, deviation check)
+      description: |
+        The path the bus is meant to drive through the trip's stops in travel order: Morning Pickup
+        stop 1 → N → School; Evening Drop School → stops in drop order; Special Trip School → waypoints
+        → School (the school point only when its location is set in Settings → Live tracking).
+        With the school's Google server key the path follows the roads (`source: google`, Routes API,
+        cached per set of stop positions, 180 days from last use); otherwise, or if Google fails, it is the stops
+        joined by straight lines (`source: straight`). Compare with `/track` to see deviations.
+      operationId: getTripPlannedPath
+      responses:
+        "200":
+          description: Points in travel order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [source, points]
+                    properties:
+                      source: { type: string, enum: [google, straight] }
+                      points:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            latitude: { type: number }
+                            longitude: { type: number }
+              example:
+                data:
+                  source: google
+                  points:
+                    - { latitude: 11.0168, longitude: 76.9558 }
+                    - { latitude: 11.0172, longitude: 76.9611 }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/route-snapshot:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Trips]
+      summary: Travelled-route snapshot of a completed trip
+      description: |
+        Made automatically in the background when a trip is completed (driver ends it or staff override):
+        the stored GPS track is simplified into an encoded polyline with its distance, and drawn over the
+        planned route and stops as a PNG with Google Maps Static API (school's server key; one call per
+        trip). Kept after the GPS history passes the school's retention period. 404 until one exists.
+      operationId: getRouteSnapshot
+      responses:
+        "200":
+          description: The snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/RouteSnapshot" }
+              example:
+                data:
+                  trip_id: 6f1c2d3e-0000-4000-8000-000000000001
+                  status: ready
+                  has_image: true
+                  polyline: "_p~iF~ps|U_ulLnnqC"
+                  distance_m: 20480
+                  point_count: 612
+                  started_at: "2026-10-14T01:40:00Z"
+                  ended_at: "2026-10-14T02:35:00Z"
+                  error: ""
+                  updated_at: "2026-10-14T02:35:04Z"
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Trips]
+      summary: Make (or remake) the route snapshot now
+      description: For a completed trip, e.g. after enabling Maps Static API on the server key. Audited as `trip.route_snapshot`.
+      operationId: createRouteSnapshot
+      responses:
+        "200":
+          description: The new snapshot (its status may be `no_gps` or `failed` with an explanation in `error`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/RouteSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`trip_not_completed`, or `snapshot_in_progress` (one is being made; retry in a minute)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/route-snapshot/image:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    get:
+      tags: [Trips]
+      summary: Route snapshot image (PNG)
+      description: |
+        1280×960 PNG: planned route (blue), travelled path (green), stops 1–9, school (S), start (A) and
+        end (B). Stored at `school_{school_id}/trips/{trip_id}.png` in the upload storage.
+      operationId: getRouteSnapshotImage
+      responses:
+        "200":
+          description: The image.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/schools/{schoolID}/audit-logs:
     parameters:
       - { $ref: "#/components/parameters/SchoolID" }
@@ -3175,6 +3299,23 @@ components:
     PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
 
   schemas:
+    RouteSnapshot:
+      type: object
+      required: [trip_id, status, has_image, polyline, distance_m, point_count, error]
+      properties:
+        trip_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [ready, no_gps, failed]
+          description: "ready: image stored; no_gps: no stored GPS points (history off); failed: see error."
+        has_image: { type: boolean }
+        polyline: { type: string, description: "Google encoded polyline of the travelled path (simplified)." }
+        distance_m: { type: integer, description: "Distance travelled, from the stored GPS points." }
+        point_count: { type: integer }
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        error: { type: string, description: Why there is no image (empty when ready). }
+        updated_at: { type: string, format: date-time }
     RouteSlots:
       type: object
       required: [trip_date, trip_type, today, last_date, my_trip, routes, buses]
@@ -3457,6 +3598,15 @@ components:
         school_latitude: { type: [number, "null"], description: "The school's location: Morning Pickup destination (School Reached)." }
         school_longitude: { type: [number, "null"] }
         default_geofence_m: { type: integer, minimum: 25, maximum: 1000, default: 100, description: Arrival radius for new stops. }
+        google_eta_refresh_seconds:
+          type: integer
+          minimum: 0
+          maximum: 3600
+          default: 300
+          description: >-
+            How often (per trip in progress) live ETAs are corrected with Google Routes, which is billed per call:
+            0 = never (own estimate only), else 5 to 3600. Between corrections the ETA still follows every GPS
+            fix (`eta_source: google` while a correction is in use). Optional on PUT: omitted keeps the current value.
     TripWaypointInput:
       type: object
       required: [name, latitude, longitude]

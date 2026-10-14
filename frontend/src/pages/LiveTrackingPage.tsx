@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   App,
   Badge,
   Button,
+  Checkbox,
   Empty,
   Flex,
   Grid,
@@ -16,27 +17,42 @@ import {
 import {
   ArrowLeftOutlined,
   CarOutlined,
+  ClearOutlined,
   LeftOutlined,
+  NodeIndexOutlined,
+  PhoneOutlined,
   RightOutlined,
   SearchOutlined,
 } from '@ant-design/icons'
+import { BusGlyph } from '../components/BusGlyph'
 import LiveMap from '../components/LiveMap'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StopProgressList from '../components/StopProgressList'
-import { busState, busStateColors, type BusState } from '../components/liveMapTypes'
+import { busState, busStateColors, pathColors, type BusState } from '../components/liveMapTypes'
 import { useCurrentSchool } from '../context/SchoolContext'
-import { useLiveBuses } from '../hooks/useLiveBuses'
+import { useLiveBuses, type TrailPoint } from '../hooks/useLiveBuses'
+import { trackApi } from '../services/admin'
 import type { BusLocation } from '../services/live'
 import { routesApi } from '../services/transport'
 import { tripsApi } from '../services/trips'
-import { tripTypeLabels, type Stop, type Trip, type TripType } from '../services/types'
+import {
+  tripTypeLabels,
+  type PlannedPath,
+  type Stop,
+  type Trip,
+  type TripType,
+} from '../services/types'
 import { todayIn } from '../utils/dates'
 import { formatDistance, formatEta } from '../utils/format'
 import { errorMessage } from '../utils/formErrors'
+import { distanceToPath, pathLength, splitByDeviation, type LatLng } from '../utils/geo'
 
 const MAP_HEIGHT = 680
 const PANEL_WIDTH = 380
+/** Further than this from the planned road route counts as off route (GPS is good to ~30 m). */
+const OFF_ROUTE_M = 150
+const NO_PATH: LatLng[] = []
 
 export default function LiveTrackingPage() {
   return <RequireSchool>{(schoolId) => <LiveTracking schoolId={schoolId} />}</RequireSchool>
@@ -83,6 +99,11 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   const [stateFilter, setStateFilter] = useState<BusState | 'all'>('all')
   const [query, setQuery] = useState('')
   const [panelOpen, setPanelOpen] = useState(true)
+  // Lines drawn for the selected bus: the planned road route and where it really went.
+  const [showPlanned, setShowPlanned] = useState(true)
+  const [showTravelled, setShowTravelled] = useState(true)
+  const [planned, setPlanned] = useState<{ tripId: string; path: PlannedPath } | null>(null)
+  const [history, setHistory] = useState<{ tripId: string; points: TrailPoint[] } | null>(null)
 
   // Trips in progress today, refreshed whenever a trip changes status.
   useEffect(() => {
@@ -113,7 +134,9 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   const buses = inScope
     .filter((b) => stateFilter === 'all' || busState(b) === stateFilter)
     .sort((a, b) => a.route_code.localeCompare(b.route_code))
+  // Only a bus still on its trip: when the trip ends, its route leaves the map by itself.
   const selected = selectedId ? live.buses[selectedId] : undefined
+  const selectedTrip = startedTrips.find((t) => t.id === selectedId)
   const selectedRouteId =
     selected?.route_id ?? startedTrips.find((t) => t.id === selectedId)?.route?.id
 
@@ -128,6 +151,89 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
       cancelled = true
     }
   }, [schoolId, selectedRouteId])
+
+  // Planned road path and stored GPS track of the selected trip.
+  useEffect(() => {
+    if (!selectedId) return
+    let cancelled = false
+    tripsApi
+      .plannedPath(schoolId, selectedId)
+      .then((path) => !cancelled && setPlanned({ tripId: selectedId, path }))
+      .catch(() => !cancelled && setPlanned(null))
+    trackApi
+      .get(schoolId, selectedId)
+      .then(
+        (pts) =>
+          !cancelled &&
+          setHistory({
+            tripId: selectedId,
+            points: pts.map((p) => ({
+              lat: p.latitude,
+              lng: p.longitude,
+              t: new Date(p.recorded_at).getTime(),
+            })),
+          }),
+      )
+      .catch(() => !cancelled && setHistory({ tripId: selectedId, points: [] }))
+    return () => {
+      cancelled = true
+    }
+  }, [schoolId, selectedId])
+
+  // Tell the user why the bus they were looking at left the map.
+  useEffect(() => {
+    const s = live.lastStatus
+    if (s && s.tripId === selectedId && (s.status === 'completed' || s.status === 'cancelled')) {
+      message.info(
+        s.status === 'completed'
+          ? 'The trip is complete. Its route has been cleared from the map.'
+          : 'The trip was cancelled. Its route has been cleared from the map.',
+      )
+    }
+  }, [live.lastStatus, selectedId, message])
+
+  // Until the planned path arrives (or if it cannot be loaded), join the stops in
+  // travel order: the live progress has them with the school, else the route's stops.
+  const progressStops = selected ? live.progress[selected.trip_id]?.stops : undefined
+  const plannedPath = useMemo<LatLng[]>(() => {
+    if (planned && planned.tripId === selected?.trip_id)
+      return planned.path.points.map((p) => ({ lat: p.latitude, lng: p.longitude }))
+    if (!selected) return []
+    const stops = progressStops?.length ? progressStops : routeStops
+    return stops.map((s) => ({ lat: s.latitude, lng: s.longitude }))
+  }, [planned, selected, progressStops, routeStops])
+  // Off-route checks only make sense against a path that follows the roads.
+  const roadPath = useMemo(
+    () =>
+      planned?.tripId === selected?.trip_id && planned?.path.source === 'google'
+        ? plannedPath
+        : NO_PATH,
+    [planned, plannedPath, selected?.trip_id],
+  )
+  const storedPoints = selected && history?.tripId === selected.trip_id ? history.points : null
+  const trail = selected ? live.trails[selected.trip_id] : undefined
+  const travelledPath = useMemo<LatLng[]>(() => {
+    if (!selected) return []
+    const stored = storedPoints ?? []
+    const lastT = stored.length ? stored[stored.length - 1].t : -Infinity
+    const pts: LatLng[] = [...stored, ...(trail ?? []).filter((p) => p.t > lastT)]
+    const now = { lat: selected.latitude, lng: selected.longitude }
+    const last = pts[pts.length - 1]
+    return last && last.lat === now.lat && last.lng === now.lng ? pts : [...pts, now]
+  }, [selected, storedPoints, trail])
+  const travelledRuns = useMemo(
+    () =>
+      roadPath.length > 1
+        ? splitByDeviation(travelledPath, roadPath, OFF_ROUTE_M)
+        : [{ off: false, path: travelledPath }],
+    [travelledPath, roadPath],
+  )
+  const offRouteM =
+    selected && roadPath.length > 1
+      ? distanceToPath({ lat: selected.latitude, lng: selected.longitude }, roadPath)
+      : null
+  const offRouteNow = offRouteM != null && offRouteM > OFF_ROUTE_M
+  const routeShown = showPlanned || showTravelled
 
   const selectedProgress = selectedId ? live.progress[selectedId] : undefined
   const nextStop = (tripId: string) =>
@@ -192,7 +298,7 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
               }
             }}
           >
-            <BusIcon color={busStateColors[state]} />
+            <BusGlyph color={busStateColors[state]} />
             <div className="stop-row__body">
               <Typography.Text strong>{b.bus_number}</Typography.Text>
               <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
@@ -213,7 +319,7 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
       })}
       {waiting.map((t) => (
         <div key={t.id} className="stop-row" style={{ cursor: 'default' }}>
-          <BusIcon color={token.colorTextQuaternary} />
+          <BusGlyph color={token.colorTextQuaternary} />
           <div className="stop-row__body">
             <Typography.Text strong>{t.bus.vehicle_number}</Typography.Text>
             <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
@@ -237,15 +343,26 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
           aria-label="Back to all buses"
           onClick={() => setSelectedId(null)}
         />
-        <BusIcon color={busStateColors[busState(selected)]} />
+        <BusGlyph color={busStateColors[busState(selected)]} />
         <div style={{ minWidth: 0 }}>
           <Typography.Text strong>{selected.bus_number}</Typography.Text>
           <br />
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {selected.route_code} · {tripTypeLabels[selected.trip_type]} · {selected.driver_name}
+            {selected.route_code} · {tripTypeLabels[selected.trip_type]}
           </Typography.Text>
         </div>
       </Flex>
+      <Typography.Text style={{ fontSize: 13 }}>
+        Driver: <strong>{selected.driver_name}</strong>
+        {selectedTrip?.driver.mobile && (
+          <>
+            {' · '}
+            <a href={`tel:${selectedTrip.driver.mobile}`}>
+              <PhoneOutlined /> {selectedTrip.driver.mobile}
+            </a>
+          </>
+        )}
+      </Typography.Text>
       <Flex gap="small" wrap align="center">
         <Tag color={stateTagColors[busState(selected)]}>{stateLabels[busState(selected)]}</Tag>
         <Typography.Text type={selected.stale ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
@@ -261,6 +378,61 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
           {formatDistance(nextStop(selected.trip_id)!.distance_m)}
         </Typography.Text>
       )}
+      <Flex
+        vertical
+        gap={6}
+        style={{
+          padding: 10,
+          borderRadius: token.borderRadius,
+          background: token.colorFillQuaternary,
+        }}
+      >
+        <Flex align="center" justify="space-between" gap="small" wrap>
+          <Button
+            size="small"
+            type={routeShown ? 'default' : 'primary'}
+            icon={routeShown ? <ClearOutlined /> : <NodeIndexOutlined />}
+            onClick={() => {
+              setShowPlanned(!routeShown)
+              setShowTravelled(!routeShown)
+            }}
+          >
+            {routeShown ? 'Clear route' : 'Show route'}
+          </Button>
+          {offRouteM != null && (
+            <Tag color={offRouteNow ? 'red' : 'green'} style={{ margin: 0 }}>
+              {offRouteNow ? `Off route · ${formatDistance(offRouteM)} away` : 'On route'}
+            </Tag>
+          )}
+        </Flex>
+        <Flex gap="middle" wrap>
+          <Checkbox checked={showPlanned} onChange={(e) => setShowPlanned(e.target.checked)}>
+            <LineKey color={pathColors.planned} /> Planned route
+          </Checkbox>
+          <Checkbox checked={showTravelled} onChange={(e) => setShowTravelled(e.target.checked)}>
+            <LineKey color={pathColors.travelled} /> Travelled
+            {roadPath.length > 1 && (
+              <>
+                {' / '}
+                <LineKey color={pathColors.off} /> off route
+              </>
+            )}
+          </Checkbox>
+        </Flex>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {[
+            travelledPath.length > 1 && `Travelled ${formatDistance(pathLength(travelledPath))}`,
+            plannedPath.length > 1 && `planned ${formatDistance(pathLength(plannedPath))}`,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+          {plannedPath.length > 1 &&
+            roadPath.length === 0 &&
+            '. The planned route joins the stops with straight lines (following the roads needs the Google server key in Settings → Maps); off-route checks need the road route.'}
+          {storedPoints?.length === 0 &&
+            ' The school keeps no GPS history, so the travelled path starts from when this page was opened.'}
+        </Typography.Text>
+      </Flex>
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
         Stops ·{' '}
         {selectedProgress
@@ -270,6 +442,41 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
       {selectedProgress && <StopProgressList stops={selectedProgress.stops} />}
     </Flex>
   )
+
+  const renderInfo = (b: BusLocation) => {
+    const state = busState(b)
+    const next = nextStop(b.trip_id)
+    const mobile = startedTrips.find((t) => t.id === b.trip_id)?.driver.mobile
+    return (
+      <div style={{ fontSize: 13, lineHeight: 1.7, color: '#1f2937' }}>
+        <div>
+          <Tag color={stateTagColors[state]}>{stateLabels[state]}</Tag>
+          <span style={{ color: '#6b7280' }}>{stateDetail(b, now)}</span>
+        </div>
+        <div>
+          Route <strong>{b.route_code}</strong> · {tripTypeLabels[b.trip_type]}
+        </div>
+        <div>
+          Driver <strong>{b.driver_name}</strong>
+        </div>
+        {mobile && (
+          <div>
+            <PhoneOutlined /> <a href={`tel:${mobile}`}>{mobile}</a>
+          </div>
+        )}
+        {next && (
+          <div>
+            Next <strong>{next.name}</strong> · ETA {formatEta(next.eta_seconds)}
+          </div>
+        )}
+        {offRouteNow && (
+          <div style={{ color: pathColors.off, fontWeight: 600 }}>
+            Off route · {formatDistance(offRouteM!)} from the planned route
+          </div>
+        )}
+      </div>
+    )
+  }
 
   const panel = (
     <div style={{ padding: '0 12px' }}>
@@ -297,6 +504,21 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
         fontSize: 12,
       }}
     >
+      {selected && showPlanned && plannedPath.length > 1 && (
+        <Flex align="center" gap={6}>
+          <LineKey color={pathColors.planned} /> Planned
+        </Flex>
+      )}
+      {selected && showTravelled && (
+        <Flex align="center" gap={6}>
+          <LineKey color={pathColors.travelled} /> Travelled
+        </Flex>
+      )}
+      {selected && showTravelled && roadPath.length > 1 && (
+        <Flex align="center" gap={6}>
+          <LineKey color={pathColors.off} /> Off route
+        </Flex>
+      )}
       {(['moving', 'stopped', 'offline'] as const).map((s) => (
         <Flex key={s} align="center" gap={6}>
           <span
@@ -360,7 +582,12 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
           buses={buses}
           selectedId={selectedId}
           onSelect={select}
-          routeStops={selectedId ? routeStops : []}
+          routeStops={selected && showPlanned ? routeStops : []}
+          progressStops={selected && showPlanned ? selectedProgress?.stops : undefined}
+          plannedPath={showPlanned ? plannedPath : NO_PATH}
+          travelled={selected && showTravelled ? travelledRuns : []}
+          renderInfo={renderInfo}
+          insetLeft={floating && panelOpen ? PANEL_WIDTH + 16 : 0}
           height={floating ? MAP_HEIGHT : 420}
         />
 
@@ -424,22 +651,19 @@ function FloatingPanel({ children }: { children: ReactNode }) {
   )
 }
 
-function BusIcon({ color }: { color: string }) {
+/** A short line in a path colour, for the legend and the route checkboxes. */
+function LineKey({ color }: { color: string }) {
   return (
-    <Flex
-      align="center"
-      justify="center"
+    <span
+      aria-hidden
       style={{
-        flex: 'none',
-        width: 36,
-        height: 36,
-        borderRadius: 10,
-        background: `${color}22`,
-        color,
-        fontSize: 18,
+        display: 'inline-block',
+        width: 16,
+        height: 4,
+        borderRadius: 2,
+        background: color,
+        verticalAlign: 'middle',
       }}
-    >
-      <CarOutlined />
-    </Flex>
+    />
   )
 }

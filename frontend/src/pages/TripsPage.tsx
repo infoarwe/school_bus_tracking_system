@@ -33,6 +33,7 @@ import LocationSearch from '../components/LocationSearch'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StopProgressList from '../components/StopProgressList'
+import RouteSnapshotCard from '../components/RouteSnapshotCard'
 import TripReplay from '../components/TripReplay'
 import { useCurrentSchool } from '../context/SchoolContext'
 import { useTripProgress } from '../hooks/useTripProgress'
@@ -920,6 +921,16 @@ function TripDrawer({
             >
               Replay GPS
             </Button>
+          )}
+          {trip.status === 'completed' && (
+            <RouteSnapshotCard
+              schoolId={schoolId}
+              tripId={trip.id}
+              fileName={`${trip.trip_date}_${trip.route?.code ?? 'trip'}_${trip.trip_type}.png`.replace(
+                /[^\w.-]+/g,
+                '-',
+              )}
+            />
           )}
           {replaying && (
             <TripReplay

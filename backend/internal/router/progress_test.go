@@ -224,3 +224,181 @@ func TestGoogleETAWithSchoolKey(t *testing.T) {
 		t.Errorf("google eta not used: source=%v first=%v", p["eta_source"], first)
 	}
 }
+
+// Path stands in for the Google road path: the points it was given plus a midpoint
+// after the first one, so the test can tell it from straight lines.
+func (f *fakeETA) Path(_ context.Context, key string, pts []tracking.LatLng) ([]tracking.LatLng, error) {
+	f.mu.Lock()
+	f.calls++
+	f.key = key
+	f.mu.Unlock()
+	mid := tracking.LatLng{Latitude: (pts[0].Latitude + pts[1].Latitude) / 2, Longitude: pts[0].Longitude + 0.0001}
+	out := append([]tracking.LatLng{pts[0], mid}, pts[1:]...)
+	return out, nil
+}
+
+func TestTripPlannedPath(t *testing.T) {
+	e := newEnv(t)
+	f := newTripFixture(e)
+	route, _ := e.compactRoute(f)
+	morning := e.do("POST", f.base+"/trips", f.tm, f.trip(f.today, "morning_pickup", route, f.bus1, f.driver1)).data()["id"].(string)
+	path := func(tripID string) (string, []any) {
+		r := e.do("GET", f.base+"/trips/"+tripID+"/planned-path", f.tm, nil)
+		e.expect(r, 200, "")
+		return r.data()["source"].(string), r.data()["points"].([]any)
+	}
+
+	// No server key: stop to stop, Alpha → Bravo → Charlie → School.
+	src, pts := path(morning)
+	if src != "straight" || len(pts) != 4 {
+		t.Fatalf("without a key: %s %v", src, pts)
+	}
+	if last := pts[3].(map[string]any); last["latitude"] != 11.008 {
+		t.Errorf("Morning Pickup should end at the school: %v", last)
+	}
+
+	// With the school's key: Google's path, then from the cache.
+	e.expect(e.do("PUT", f.base+"/settings/maps", f.admin,
+		map[string]any{"browser_key": "", "server_key": "AIza" + strings.Repeat("P", 35)}), 200, "")
+	if src, pts := path(morning); src != "google" || len(pts) != 5 {
+		t.Fatalf("with a key: %s %v", src, pts)
+	}
+	path(morning)
+	if n, _ := e.eta.count(); n != 1 {
+		t.Errorf("google calls = %d, want 1 (second request cached)", n)
+	}
+
+	// Evening Drop starts at the school.
+	e.expect(e.do("PUT", f.base+"/settings/maps", f.admin, map[string]any{"browser_key": "", "server_key": ""}), 200, "")
+	evening := e.do("POST", f.base+"/trips", f.tm, f.trip(f.today, "evening_drop", route, f.bus1, f.driver1))
+	e.expect(evening, 201, "")
+	if _, pts := path(evening.data()["id"].(string)); len(pts) == 0 || pts[0].(map[string]any)["latitude"] != 11.008 {
+		t.Errorf("Evening Drop should start at the school: %v", pts)
+	}
+}
+
+// fakeStaticMap stands in for Google Static Maps: a tiny PNG, and the request it got.
+type fakeStaticMap struct {
+	mu    sync.Mutex
+	calls int
+	paths []tracking.MapPath
+}
+
+func (f *fakeStaticMap) Render(_ context.Context, _ string, paths []tracking.MapPath, _ []tracking.MapMarker) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.paths = paths
+	return []byte("\x89PNG\r\n\x1a\nfake"), nil
+}
+
+func (f *fakeStaticMap) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func TestRouteSnapshotOnTripEnd(t *testing.T) {
+	e := newEnv(t)
+	maps := &fakeStaticMap{}
+	e.api.StaticMaps = maps
+	f := newTripFixture(e)
+	route, _ := e.compactRoute(f)
+	e.expect(e.do("PUT", f.base+"/settings/maps", f.admin,
+		map[string]any{"browser_key": "", "server_key": "AIza" + strings.Repeat("S", 35)}), 200, "")
+	tripID := e.do("POST", f.base+"/trips", f.tm, f.trip(f.today, "morning_pickup", route, f.bus1, f.driver1)).data()["id"].(string)
+	snapURL := f.base + "/trips/" + tripID + "/route-snapshot"
+
+	// Only completed trips get one.
+	e.expect(e.do("GET", snapURL, f.tm, nil), 404, "not_found")
+	e.expect(e.do("POST", snapURL, f.tm, nil), 409, "trip_not_completed")
+
+	e.do("POST", "/api/v1/driver/trips/"+tripID+"/confirm", f.driver1Tok, nil)
+	e.do("POST", "/api/v1/driver/trips/"+tripID+"/start", f.driver1Tok, nil)
+	e.drive(f, tripID, 11.000, 11.0085, time.Now())
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+tripID+"/end", f.driver1Tok, nil), 200, "")
+
+	// Made in the background after the trip ends.
+	var snap map[string]any
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r := e.do("GET", snapURL, f.tm, nil)
+		if r.Status == 200 {
+			snap = r.data()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no snapshot: %v", r.Body)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if snap["status"] != "ready" || snap["has_image"] != true || snap["polyline"] == "" {
+		t.Fatalf("snapshot = %v", snap)
+	}
+	if d := snap["distance_m"].(float64); d < 900 || d > 1000 { // 11.000 → 11.0085 ≈ 945 m
+		t.Errorf("distance_m = %v", d)
+	}
+	if _, ok := snap["image_key"]; ok {
+		t.Error("the storage key must not be exposed")
+	}
+	if len(maps.paths) != 2 {
+		t.Errorf("want planned + travelled paths, got %d", len(maps.paths))
+	}
+
+	// The image is stored under school_{id}/trips/{trip}.png and served to staff.
+	img := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", snapURL+"/image", nil)
+	req.Header.Set("Authorization", "Bearer "+f.tm)
+	e.srv.ServeHTTP(img, req)
+	if img.Code != 200 || img.Header().Get("Content-Type") != "image/png" || !strings.HasPrefix(img.Body.String(), "\x89PNG") {
+		t.Fatalf("image: %d %s", img.Code, img.Header().Get("Content-Type"))
+	}
+	if rc, err := e.api.Files.Open(context.Background(), "school_"+f.school+"/trips/"+tripID+".png"); err != nil {
+		t.Errorf("stored file: %v", err)
+	} else {
+		rc.Close()
+	}
+
+	// Remaking it on request calls Google again.
+	before := maps.count()
+	e.expect(e.do("POST", snapURL, f.admin, nil), 200, "")
+	if maps.count() != before+1 {
+		t.Errorf("remake did not render")
+	}
+}
+
+func TestGoogleETARefreshSetting(t *testing.T) {
+	e := newEnv(t)
+	f := newTripFixture(e)
+	url := f.base + "/settings/tracking"
+	get := func() float64 {
+		r := e.do("GET", url, f.admin, nil)
+		e.expect(r, 200, "")
+		return r.data()["google_eta_refresh_seconds"].(float64)
+	}
+	if v := get(); v != 300 {
+		t.Fatalf("default = %v, want 300", v)
+	}
+	base := map[string]any{"location_retention_days": 30, "stale_after_seconds": 120, "approach_distance_m": 1000}
+	with := func(v any) map[string]any {
+		m := map[string]any{"google_eta_refresh_seconds": v}
+		for k, x := range base {
+			m[k] = x
+		}
+		return m
+	}
+	// Omitted (an older web build): the value is kept, Google is not switched off.
+	e.expect(e.do("PUT", url, f.admin, base), 200, "")
+	if v := get(); v != 300 {
+		t.Errorf("after save without the field = %v, want 300", v)
+	}
+	e.expect(e.do("PUT", url, f.admin, with(0)), 200, "")
+	if v := get(); v != 0 {
+		t.Errorf("off = %v", v)
+	}
+	e.expect(e.do("PUT", url, f.admin, with(7)), 200, "")
+	for _, bad := range []int{4, 3601, -1} {
+		r := e.do("PUT", url, f.admin, with(bad))
+		e.expect(r, 400, "validation_failed")
+	}
+}

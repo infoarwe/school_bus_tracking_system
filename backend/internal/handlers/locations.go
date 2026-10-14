@@ -138,12 +138,20 @@ func (a *API) GetTrackingSettings(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, s)
 }
 
+// trackingSettingsRequest: google_eta_refresh_seconds is optional (omitted keeps the
+// current value), so a client that does not know the field cannot switch Google off.
+type trackingSettingsRequest struct {
+	store.TrackingSettings
+	GoogleETARefreshSeconds *int `json:"google_eta_refresh_seconds"`
+}
+
 func (a *API) UpdateTrackingSettings(w http.ResponseWriter, r *http.Request) {
 	schoolID := chi.URLParam(r, "schoolID")
-	var req store.TrackingSettings
-	if !httpx.Decode(w, r, &req) {
+	var body trackingSettingsRequest
+	if !httpx.Decode(w, r, &body) {
 		return
 	}
+	req := body.TrackingSettings
 	v := validate.New()
 	v.Check(req.LocationRetentionDays >= 0 && req.LocationRetentionDays <= 365, "location_retention_days", "must be 0 to 365")
 	v.Check(req.StaleAfterSeconds >= 30 && req.StaleAfterSeconds <= 1800, "stale_after_seconds", "must be 30 to 1800")
@@ -152,6 +160,9 @@ func (a *API) UpdateTrackingSettings(w http.ResponseWriter, r *http.Request) {
 		req.DefaultGeofenceM = defaultGeofenceM
 	}
 	v.Check(req.DefaultGeofenceM >= minGeofenceM && req.DefaultGeofenceM <= maxGeofenceM, "default_geofence_m", "must be 25 to 1000")
+	if g := body.GoogleETARefreshSeconds; g != nil {
+		v.Check(*g == 0 || (*g >= 5 && *g <= 3600), "google_eta_refresh_seconds", "must be 0 (off) or 5 to 3600")
+	}
 	v.Check((req.SchoolLatitude == nil) == (req.SchoolLongitude == nil), "school_latitude", "give both latitude and longitude, or neither")
 	if req.SchoolLatitude != nil && req.SchoolLongitude != nil {
 		v.Check(*req.SchoolLatitude >= -90 && *req.SchoolLatitude <= 90 && *req.SchoolLongitude >= -180 && *req.SchoolLongitude <= 180 &&
@@ -166,6 +177,10 @@ func (a *API) UpdateTrackingSettings(w http.ResponseWriter, r *http.Request) {
 		before, err := store.GetTrackingSettings(ctx, q, schoolID)
 		if err != nil {
 			return err
+		}
+		req.GoogleETARefreshSeconds = before.GoogleETARefreshSeconds
+		if body.GoogleETARefreshSeconds != nil {
+			req.GoogleETARefreshSeconds = *body.GoogleETARefreshSeconds
 		}
 		if err := store.SetTrackingSettings(ctx, q, schoolID, req); err != nil {
 			return err

@@ -27,6 +27,8 @@ export interface TrackingSettings {
   school_longitude: number | null
   /** Arrival radius used for new stops. */
   default_geofence_m: number
+  /** How often live ETAs are corrected with Google (billed per call), per trip; 0 = never. */
+  google_eta_refresh_seconds: number
 }
 
 export const trackingSettingsApi = {

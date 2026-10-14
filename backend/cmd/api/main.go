@@ -116,6 +116,7 @@ func run() error {
 		Live:                 live,
 		Hub:                  hub,
 		ETA:                  tracking.NewGoogleRoutes(),
+		StaticMaps:           tracking.NewStaticMap(),
 		CheckPushKey:         handlers.CheckFCMKey,
 		WSOriginPatterns:     originHosts(cfg.CORSOrigins),
 		Limiter:              limiter,

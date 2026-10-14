@@ -104,7 +104,7 @@ func (a *API) processProgress(ctx context.Context, r *http.Request, t *models.Tr
 	if err != nil {
 		return err
 	}
-	p.UpdateETAs(now, g)
+	p.UpdateETAs(now, g, tracking.GoogleMaxAge(settings.GoogleETARefresh()))
 	p.UpdatedAt = now.UTC()
 
 	for _, e := range events {
@@ -123,7 +123,7 @@ func (a *API) processProgress(ctx context.Context, r *http.Request, t *models.Tr
 	if err := a.notifyStopEvents(ctx, t, p, events); err != nil {
 		internalErrorLog(r, err) // the stop status is saved; only the push is affected
 	}
-	if p.NeedsGoogleRefresh(now, g) {
+	if p.NeedsGoogleRefresh(now, g, settings.GoogleETARefresh()) {
 		a.refreshGoogleETA(t, p)
 	}
 	return nil
@@ -136,7 +136,7 @@ func (a *API) refreshGoogleETA(t *models.Trip, p *tracking.TripProgress) {
 	if a.ETA == nil || p.LastPoint == nil {
 		return
 	}
-	from, pending := *p.LastPoint, p.Pending()
+	from, pending, speed := *p.LastPoint, p.Pending(), p.SpeedMPS
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -160,6 +160,7 @@ func (a *API) refreshGoogleETA(t *models.Trip, p *tracking.TripProgress) {
 			slog.Warn("google ETA failed; using estimate", "trip_id", t.ID, "err", err)
 			return
 		}
+		g.Calibrate(from, speed, pending)
 		if err := a.Live.SaveGoogleETA(ctx, t.ID, g); err != nil {
 			slog.Error("save google eta", "err", err)
 		}

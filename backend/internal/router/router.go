@@ -236,6 +236,10 @@ func New(d Deps) http.Handler {
 						r.Get("/trips/{tripID}/progress", a.TripProgress)
 						r.Post("/trips/{tripID}/delays", a.StaffReportDelay)
 						r.Get("/trips/{tripID}/track", a.TripTrack)
+						r.Get("/trips/{tripID}/planned-path", a.TripPlannedPath)
+						r.Get("/trips/{tripID}/route-snapshot", a.GetRouteSnapshot)
+						r.Post("/trips/{tripID}/route-snapshot", a.CreateRouteSnapshot)
+						r.Get("/trips/{tripID}/route-snapshot/image", a.RouteSnapshotImage)
 
 						// Dashboard, reports, audit log (S8).
 						r.Get("/dashboard", a.Dashboard)

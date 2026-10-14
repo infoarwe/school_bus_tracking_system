@@ -35,6 +35,8 @@ type API struct {
 	Hub  *tracking.Hub
 	// ETA computes Google ETAs with each school's server key; nil disables Google (estimate only).
 	ETA ETAProvider
+	// StaticMaps renders the travelled-route image of completed trips; nil disables it.
+	StaticMaps StaticMapper
 	// CheckPushKey verifies a school's Firebase key with Google (Settings → Test).
 	CheckPushKey PushKeyChecker
 	// WSOriginPatterns are the browser origins allowed to open the WebSocket (host[:port]).

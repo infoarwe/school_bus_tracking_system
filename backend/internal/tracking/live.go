@@ -17,6 +17,7 @@ import (
 //	school:{schoolID}:live     hash tripID → BusLocation of every trip in progress
 //	live:schools               set of schools with trips in progress (for the stale sweep)
 //	school:{schoolID}:events   pub/sub channel for Event messages
+//	path:{sha256 of points}    Google road path through a trip's stops (holds only coordinates), 180 days from last use
 const (
 	locTTL         = 12 * time.Hour
 	liveSchoolsKey = "live:schools"
@@ -305,4 +306,32 @@ func (l *Live) PublishAlert(ctx context.Context, schoolID, tripID string, alert 
 		return err
 	}
 	return l.rdb.Publish(ctx, eventsKey(schoolID), ev).Err()
+}
+
+// plannedPathTTL: a road path is computed once per set of stop positions (the key
+// includes them, so moving a stop gives a new path) and kept while it is used:
+// every read extends it. Google Routes is billed per call.
+const plannedPathTTL = 180 * 24 * time.Hour
+
+func plannedPathKey(hash string) string { return "path:" + hash }
+
+// PlannedPath returns a cached road path (extending its life), or nil.
+func (l *Live) PlannedPath(ctx context.Context, hash string) ([]LatLng, error) {
+	raw, err := l.rdb.GetEx(ctx, plannedPathKey(hash), plannedPathTTL).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("redis get planned path: %w", err)
+	}
+	var p []LatLng
+	return p, json.Unmarshal(raw, &p)
+}
+
+func (l *Live) SavePlannedPath(ctx context.Context, hash string, p []LatLng) error {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return l.rdb.Set(ctx, plannedPathKey(hash), raw, plannedPathTTL).Err()
 }
