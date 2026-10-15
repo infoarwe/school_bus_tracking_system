@@ -48,6 +48,8 @@ export const reportsApi = {
 export interface AuditQuery extends ListParams {
   action?: string
   entity_type?: string
+  entity_id?: string
+  actor_id?: string
   from?: string
   to?: string
   school_id?: string

@@ -43,6 +43,8 @@ function readCollapsed(): boolean {
 /** Labels for pages below a menu entry (e.g. /routes/:id). */
 const SUB_PAGES: { pattern: RegExp; label: string }[] = [
   { pattern: /^\/routes\/[^/]+/, label: 'Route details' },
+  { pattern: /^\/drivers\/[^/]+/, label: 'Driver details' },
+  { pattern: /^\/buses\/[^/]+/, label: 'Bus details' },
   { pattern: /^\/students\/import/, label: 'Import CSV' },
   { pattern: /^\/account/, label: 'My account' },
 ]

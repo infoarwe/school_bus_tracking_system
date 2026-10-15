@@ -21,10 +21,13 @@ export default function RouteSnapshotCard({
   schoolId,
   tripId,
   fileName,
+  onLoaded,
 }: {
   schoolId: string
   tripId: string
   fileName: string
+  /** Called with the snapshot once known (null = none yet); must be stable. */
+  onLoaded?: (snap: RouteSnapshot | null) => void
 }) {
   const { message } = App.useApp()
   const [snap, setSnap] = useState<RouteSnapshot | null | undefined>(undefined) // null = none yet
@@ -45,6 +48,10 @@ export default function RouteSnapshotCard({
       cancelled = true
     }
   }, [schoolId, tripId, message])
+
+  useEffect(() => {
+    if (snap !== undefined) onLoaded?.(snap)
+  }, [snap, onLoaded])
 
   // Load the PNG (it needs the access token) whenever a new snapshot is ready.
   useEffect(() => {

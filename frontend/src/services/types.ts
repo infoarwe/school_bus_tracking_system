@@ -386,8 +386,13 @@ export interface TripDetail extends Trip {
 
 export interface TripListParams extends ListParams {
   date?: string
+  /** Inclusive YYYY-MM-DD range, used when date is not set. */
+  from?: string
+  to?: string
   trip_type?: TripType
   route_id?: string
+  driver_id?: string
+  bus_id?: string
 }
 
 export interface CopyTripsResult {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   App,
   Badge,
@@ -92,7 +93,9 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   const { school } = useCurrentSchool()
   const live = useLiveBuses(schoolId)
   const [startedTrips, setStartedTrips] = useState<Trip[]>([])
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // ?trip=<id> (e.g. from a driver's page) opens with that bus selected.
+  const [searchParams] = useSearchParams()
+  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get('trip'))
   const [routeStops, setRouteStops] = useState<Stop[]>([])
   const [now, setNow] = useState(() => Date.now())
   const [typeFilter, setTypeFilter] = useState<TripType | 'all'>('all')

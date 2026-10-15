@@ -1,42 +1,49 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   Alert,
   App,
+  Avatar,
   Button,
   Checkbox,
-  Descriptions,
-  Drawer,
   Dropdown,
   Flex,
   Form,
   Input,
   InputNumber,
   Modal,
+  Progress,
   Segmented,
   Select,
   Space,
   Switch,
   Table,
   Tag,
-  Timeline,
   Typography,
 } from 'antd'
 import {
+  CarOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
   CopyOutlined,
   DownOutlined,
-  HistoryOutlined,
+  FlagOutlined,
+  LeftOutlined,
+  MoonOutlined,
+  PlayCircleOutlined,
+  RightOutlined,
+  StopOutlined,
+  SunOutlined,
+  TeamOutlined,
+  UnorderedListOutlined,
   MinusCircleOutlined,
   PlusOutlined,
 } from '@ant-design/icons'
 import LocationSearch from '../components/LocationSearch'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
-import StopProgressList from '../components/StopProgressList'
-import RouteSnapshotCard from '../components/RouteSnapshotCard'
-import TripReplay from '../components/TripReplay'
+import TripDetailDrawer, { StatTile, TripStatusTag } from '../components/TripDetailDrawer'
 import { useCurrentSchool } from '../context/SchoolContext'
-import { useTripProgress } from '../hooks/useTripProgress'
 import { busesApi, driversApi, routesApi } from '../services/transport'
 import { tripsApi } from '../services/trips'
 import {
@@ -45,28 +52,26 @@ import {
   type BusRoute,
   type Driver,
   type Trip,
-  type TripDetail,
   type TripInput,
-  type TripStatus,
   type TripType,
   type WaypointInput,
 } from '../services/types'
+import { avatarColor, initials } from '../utils/avatar'
 import { addDays, formatDate, todayIn, weekdayOf } from '../utils/dates'
 import { applyApiErrors, errorMessage } from '../utils/formErrors'
 
-const statusColors: Record<TripStatus, string> = {
-  scheduled: 'default',
-  confirmed: 'cyan',
-  started: 'green',
-  completed: 'blue',
-  cancelled: 'red',
-}
-
-function TripStatusTag({ status }: { status: TripStatus }) {
-  return <Tag color={statusColors[status]}>{status[0].toUpperCase() + status.slice(1)}</Tag>
-}
-
 const isOpen = (t: Trip) => t.status === 'scheduled' || t.status === 'confirmed'
+
+type StatusFilter = 'all' | 'waiting' | 'started' | 'completed' | 'cancelled'
+
+const matchesFilter = (t: Trip, f: StatusFilter) =>
+  f === 'all' ? true : f === 'waiting' ? isOpen(t) : t.status === f
+
+const tripTypeIcons: Record<TripType, ReactNode> = {
+  morning_pickup: <SunOutlined />,
+  evening_drop: <MoonOutlined />,
+  special_trip: <FlagOutlined />,
+}
 
 export default function TripsPage() {
   return <RequireSchool>{(schoolId) => <Trips schoolId={schoolId} />}</RequireSchool>
@@ -100,6 +105,22 @@ function Trips({ schoolId }: { schoolId: string }) {
     action: 'cancel' | 'started' | 'completed' | 'cancelled'
   } | null>(null)
   const [copying, setCopying] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const clock = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+        timeZone: school?.timezone || undefined,
+      }),
+    [school?.timezone],
+  )
+  const time = (iso: string | null) => (iso ? clock.format(new Date(iso)) : null)
+  const goTo = (d: string) => {
+    setLoading(true)
+    setDate(d)
+  }
 
   // Active routes, buses and drivers for the form; inactive ones cannot be assigned anyway.
   useEffect(() => {
@@ -129,8 +150,12 @@ function Trips({ schoolId }: { schoolId: string }) {
     setReloadKey((k) => k + 1)
   }, [])
 
-  const trips = dayTrips.filter((t) => t.trip_type === tripType)
-  const active = trips.filter((t) => t.status !== 'cancelled')
+  const typeTrips = dayTrips.filter((t) => t.trip_type === tripType)
+  const trips = typeTrips.filter((t) => matchesFilter(t, statusFilter))
+  const active = typeTrips.filter((t) => t.status !== 'cancelled')
+  const count = (f: StatusFilter) => typeTrips.filter((t) => matchesFilter(t, f)).length
+  const riders = active.reduce((n, t) => n + t.student_count, 0)
+  const toggle = (f: StatusFilter) => setStatusFilter((cur) => (cur === f ? 'all' : f))
   const runsType = (r: BusRoute) =>
     tripType === 'morning_pickup'
       ? r.supports_pickup
@@ -168,46 +193,102 @@ function Trips({ schoolId }: { schoolId: string }) {
           </Space>
         }
       />
-      <Flex gap="small" wrap align="center">
-        <Input
-          type="date"
-          value={date}
-          style={{ width: 170 }}
-          onChange={(e) => {
-            if (!e.target.value) return
-            setLoading(true)
-            setDate(e.target.value)
-          }}
-        />
-        <Button
-          onClick={() => {
-            setLoading(true)
-            setDate(today)
-          }}
-          disabled={date === today}
-        >
-          Today
-        </Button>
-        <Typography.Text type="secondary">{formatDate(date)}</Typography.Text>
+      <Flex gap="small" wrap align="center" justify="space-between">
+        <Flex gap="small" wrap align="center">
+          <Space.Compact>
+            <Button
+              icon={<LeftOutlined />}
+              aria-label="Previous day"
+              onClick={() => goTo(addDays(date, -1))}
+            />
+            <Input
+              type="date"
+              value={date}
+              style={{ width: 160 }}
+              onChange={(e) => e.target.value && goTo(e.target.value)}
+            />
+            <Button
+              icon={<RightOutlined />}
+              aria-label="Next day"
+              onClick={() => goTo(addDays(date, 1))}
+            />
+          </Space.Compact>
+          <Button onClick={() => goTo(today)} disabled={date === today}>
+            Today
+          </Button>
+          <Typography.Text strong>{formatDate(date)}</Typography.Text>
+          {date === today ? (
+            <Tag color="green">Today</Tag>
+          ) : past ? (
+            <Tag>Past</Tag>
+          ) : (
+            <Tag color="blue">Upcoming</Tag>
+          )}
+        </Flex>
         <Segmented<TripType>
           value={tripType}
           onChange={setTripType}
-          options={[
-            {
-              value: 'morning_pickup',
-              label: `Morning Pickup (${dayTrips.filter((t) => t.trip_type === 'morning_pickup' && t.status !== 'cancelled').length})`,
-            },
-            {
-              value: 'evening_drop',
-              label: `Evening Drop (${dayTrips.filter((t) => t.trip_type === 'evening_drop' && t.status !== 'cancelled').length})`,
-            },
-            {
-              value: 'special_trip',
-              label: `Special Trip / Outing (${dayTrips.filter((t) => t.trip_type === 'special_trip' && t.status !== 'cancelled').length})`,
-            },
-          ]}
+          options={(['morning_pickup', 'evening_drop', 'special_trip'] as TripType[]).map(
+            (type) => ({
+              value: type,
+              icon: tripTypeIcons[type],
+              label: `${type === 'special_trip' ? 'Special Trip / Outing' : tripTypeLabels[type]} (${
+                dayTrips.filter((t) => t.trip_type === type && t.status !== 'cancelled').length
+              })`,
+            }),
+          )}
         />
       </Flex>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+          gap: 12,
+        }}
+      >
+        <StatTile
+          tone="geekblue"
+          icon={<UnorderedListOutlined />}
+          title="All trips"
+          value={typeTrips.length}
+          active={statusFilter === 'all'}
+          onClick={() => setStatusFilter('all')}
+        />
+        <StatTile
+          tone="gold"
+          icon={<ClockCircleOutlined />}
+          title="Not started"
+          value={count('waiting')}
+          active={statusFilter === 'waiting'}
+          onClick={() => toggle('waiting')}
+        />
+        <StatTile
+          tone="green"
+          icon={<PlayCircleOutlined />}
+          title="Running now"
+          value={count('started')}
+          active={statusFilter === 'started'}
+          onClick={() => toggle('started')}
+        />
+        <StatTile
+          tone="cyan"
+          icon={<CheckCircleOutlined />}
+          title="Completed"
+          value={count('completed')}
+          active={statusFilter === 'completed'}
+          onClick={() => toggle('completed')}
+        />
+        <StatTile
+          tone="red"
+          icon={<StopOutlined />}
+          title="Cancelled"
+          value={count('cancelled')}
+          active={statusFilter === 'cancelled'}
+          onClick={() => toggle('cancelled')}
+        />
+        <StatTile tone="purple" icon={<TeamOutlined />} title="Students riding" value={riders} />
+      </div>
 
       {!past && unassigned.length > 0 && (
         <Alert
@@ -232,66 +313,128 @@ function Trips({ schoolId }: { schoolId: string }) {
         dataSource={trips}
         pagination={false}
         scroll={{ x: 1000 }}
-        locale={{ emptyText: `No ${tripTypeLabels[tripType]} trips on this date.` }}
+        locale={{
+          emptyText:
+            statusFilter !== 'all' && typeTrips.length ? (
+              <>
+                No trips match this filter. <a onClick={() => setStatusFilter('all')}>Show all</a>
+              </>
+            ) : (
+              `No ${tripTypeLabels[tripType]} trips on this date.`
+            ),
+        }}
         rowClassName={(t) => (t.status === 'cancelled' ? 'row-muted' : '')}
         columns={[
           {
             title: 'Route',
             render: (_, t) => (
-              <a onClick={() => setViewing(t.id)}>
-                {t.trip_type === 'special_trip' && (
-                  <Tag color="purple" style={{ marginInlineEnd: 6 }}>
-                    Outing
-                  </Tag>
+              <Flex vertical gap={2}>
+                <a onClick={() => setViewing(t.id)}>
+                  {t.route ? (
+                    <Space size={6}>
+                      <Tag color="geekblue" style={{ fontWeight: 600, marginInlineEnd: 0 }}>
+                        {t.route.code}
+                      </Tag>
+                      <span>{t.route.name}</span>
+                    </Space>
+                  ) : (
+                    <Space size={6}>
+                      <Tag color="purple" icon={<FlagOutlined />} style={{ marginInlineEnd: 0 }}>
+                        Outing
+                      </Tag>
+                      <strong>{t.title}</strong>
+                    </Space>
+                  )}
+                </a>
+                {t.route && (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {t.route.stop_count} stop{t.route.stop_count === 1 ? '' : 's'}
+                    {t.trip_type === 'special_trip' && ' · special trip on this route'}
+                  </Typography.Text>
                 )}
-                {t.route ? (
-                  <>
-                    <strong>{t.route.code}</strong> · {t.route.name}
-                  </>
-                ) : (
-                  <strong>{t.title}</strong>
-                )}
-              </a>
+              </Flex>
             ),
           },
           {
             title: 'Bus',
-            render: (_, t) => t.bus.vehicle_number,
+            width: 170,
+            render: (_, t) => (
+              <Space size={6}>
+                <CarOutlined style={{ color: '#d97706' }} />
+                <Link to={`/buses/${t.bus.id}`} style={{ fontWeight: 500 }}>
+                  {t.bus.vehicle_number}
+                </Link>
+              </Space>
+            ),
           },
           {
             title: 'Driver',
             render: (_, t) => (
-              <>
-                {t.driver.name}
-                {t.assigned_by === 'driver' && (
-                  <Tag
-                    color="purple"
-                    style={{ marginInlineStart: 6 }}
-                    title="The driver took this route in the Driver app"
-                  >
-                    Self-assigned
-                  </Tag>
-                )}
-                <br />
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {t.driver.mobile}
-                </Typography.Text>
-              </>
+              <Space size="small" align="center">
+                <Avatar size="small" style={{ background: avatarColor(t.driver.id) }}>
+                  {initials(t.driver.name)}
+                </Avatar>
+                <Flex vertical>
+                  <span>
+                    <Link to={`/drivers/${t.driver.id}`}>{t.driver.name}</Link>
+                    {t.assigned_by === 'driver' && (
+                      <Tag
+                        color="purple"
+                        style={{ marginInlineStart: 6 }}
+                        title="The driver took this route in the Driver app"
+                      >
+                        Self-assigned
+                      </Tag>
+                    )}
+                  </span>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {t.driver.mobile}
+                  </Typography.Text>
+                </Flex>
+              </Space>
             ),
           },
           {
             title: 'Students / seats',
-            width: 130,
-            render: (_, t) => (
-              <Typography.Text type={t.student_count > t.bus.capacity ? 'danger' : undefined}>
-                {t.student_count} / {t.bus.capacity}
-              </Typography.Text>
-            ),
+            width: 150,
+            render: (_, t) => {
+              const over = t.student_count > t.bus.capacity
+              return (
+                <Flex vertical>
+                  <Typography.Text type={over ? 'danger' : undefined}>
+                    {t.student_count} / {t.bus.capacity}
+                    {over && ' · over capacity'}
+                  </Typography.Text>
+                  <Progress
+                    percent={Math.min(100, (t.student_count / Math.max(t.bus.capacity, 1)) * 100)}
+                    showInfo={false}
+                    size="small"
+                    status={over ? 'exception' : 'normal'}
+                    strokeColor={over ? undefined : '#7c3aed'}
+                  />
+                </Flex>
+              )
+            },
           },
           {
             title: 'Status',
-            width: 120,
-            render: (_, t) => <TripStatusTag status={t.status} />,
+            width: 160,
+            render: (_, t) => (
+              <Flex vertical align="flex-start" gap={2}>
+                <TripStatusTag status={t.status} />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {t.status === 'started'
+                    ? `since ${time(t.started_at)}`
+                    : t.status === 'completed'
+                      ? `${time(t.started_at) ?? '—'} – ${time(t.ended_at)}`
+                      : t.status === 'cancelled'
+                        ? t.cancel_reason
+                        : t.status === 'confirmed'
+                          ? 'driver confirmed'
+                          : 'waiting for driver'}
+                </Typography.Text>
+              </Flex>
+            ),
           },
           {
             title: 'Actions',
@@ -381,7 +524,7 @@ function Trips({ schoolId }: { schoolId: string }) {
         />
       )}
       {viewing && (
-        <TripDrawer schoolId={schoolId} tripId={viewing} onClose={() => setViewing(null)} />
+        <TripDetailDrawer schoolId={schoolId} tripId={viewing} onClose={() => setViewing(null)} />
       )}
     </Flex>
   )
@@ -851,183 +994,5 @@ function CopyModal({
         {targets.length ? targets.map(formatDate).join(' · ') : 'No dates selected.'}
       </Typography.Paragraph>
     </Modal>
-  )
-}
-
-function TripDrawer({
-  schoolId,
-  tripId,
-  onClose,
-}: {
-  schoolId: string
-  tripId: string
-  onClose: () => void
-}) {
-  const { message } = App.useApp()
-  const [trip, setTrip] = useState<TripDetail | null>(null)
-  const live = useTripProgress(schoolId, tripId)
-  const [replaying, setReplaying] = useState(false)
-
-  useEffect(() => {
-    tripsApi
-      .get(schoolId, tripId)
-      .then(setTrip)
-      .catch((e: unknown) => message.error(errorMessage(e)))
-  }, [schoolId, tripId, message])
-
-  return (
-    <Drawer
-      open
-      onClose={onClose}
-      size="large"
-      loading={!trip}
-      title={trip && `${trip.route?.code ?? trip.title} · ${tripTypeLabels[trip.trip_type]}`}
-    >
-      {trip && (
-        <Flex vertical gap="large">
-          <Descriptions column={1} size="small" bordered>
-            <Descriptions.Item label="Date">{formatDate(trip.trip_date)}</Descriptions.Item>
-            <Descriptions.Item label="Status">
-              <TripStatusTag status={trip.status} />
-              {trip.cancel_reason && ` ${trip.cancel_reason}`}
-            </Descriptions.Item>
-            <Descriptions.Item label={trip.route ? 'Route' : 'Outing'}>
-              {trip.route ? `${trip.route.code} · ${trip.route.name}` : trip.title}
-            </Descriptions.Item>
-            <Descriptions.Item label="Bus">{`${trip.bus.vehicle_number} (${trip.bus.capacity} seats)`}</Descriptions.Item>
-            <Descriptions.Item label="Driver">{`${trip.driver.name} · ${trip.driver.mobile}`}</Descriptions.Item>
-            <Descriptions.Item label="Assigned by">
-              {trip.assigned_by === 'driver'
-                ? 'The driver (took it in the Driver app)'
-                : 'School staff'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Students">{trip.student_count}</Descriptions.Item>
-            {trip.trip_type === 'special_trip' && (
-              <Descriptions.Item label="Notify parents">
-                {trip.route
-                  ? trip.notify_parents
-                    ? "Yes — the template route's usual parents"
-                    : 'No'
-                  : 'No — this outing has no template route'}
-              </Descriptions.Item>
-            )}
-            {trip.notes && <Descriptions.Item label="Notes">{trip.notes}</Descriptions.Item>}
-          </Descriptions>
-          {trip.started_at && (
-            <Button
-              icon={<HistoryOutlined />}
-              onClick={() => setReplaying(true)}
-              style={{ alignSelf: 'flex-start' }}
-            >
-              Replay GPS
-            </Button>
-          )}
-          {trip.status === 'completed' && (
-            <RouteSnapshotCard
-              schoolId={schoolId}
-              tripId={trip.id}
-              fileName={`${trip.trip_date}_${trip.route?.code ?? 'trip'}_${trip.trip_type}.png`.replace(
-                /[^\w.-]+/g,
-                '-',
-              )}
-            />
-          )}
-          {replaying && (
-            <TripReplay
-              schoolId={schoolId}
-              tripId={trip.id}
-              title={`${trip.route?.code ?? trip.title} · ${tripTypeLabels[trip.trip_type]} · ${formatDate(trip.trip_date)}`}
-              stops={trip.stops}
-              onClose={() => setReplaying(false)}
-            />
-          )}
-
-          <div>
-            <Typography.Title level={5}>Stop progress</Typography.Title>
-            {live?.progress ? (
-              <>
-                <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-                  Live from GPS · ETA{' '}
-                  {live.progress.eta_source === 'google' ? 'by Google' : 'estimated'}
-                </Typography.Paragraph>
-                <StopProgressList stops={live.progress.stops} />
-              </>
-            ) : live?.events.length ? (
-              <Timeline
-                items={live.events.map((e) => ({
-                  color: e.missed ? 'red' : e.event_type === 'reached' ? 'green' : 'blue',
-                  content: (
-                    <>
-                      {e.event_type === 'school_reached'
-                        ? 'Reached school'
-                        : `${e.missed ? 'Missed' : e.event_type[0].toUpperCase() + e.event_type.slice(1)} ${e.stop_name ?? ''}`}
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {' · '}
-                        {new Date(e.occurred_at).toLocaleTimeString()}
-                      </Typography.Text>
-                    </>
-                  ),
-                }))}
-              />
-            ) : (
-              <Typography.Text type="secondary">
-                Stop status appears here once the trip starts and the bus sends GPS.
-              </Typography.Text>
-            )}
-          </div>
-
-          <div>
-            <Typography.Title level={5}>Stops</Typography.Title>
-            <Table
-              rowKey="id"
-              size="small"
-              pagination={false}
-              dataSource={trip.stops}
-              columns={[
-                { title: '#', dataIndex: 'sequence', width: 50 },
-                { title: 'Stop', dataIndex: 'name' },
-                {
-                  title:
-                    trip.trip_type === 'morning_pickup'
-                      ? 'Pickup'
-                      : trip.trip_type === 'evening_drop'
-                        ? 'Drop'
-                        : 'Scheduled',
-                  render: (_, s) =>
-                    (trip.trip_type === 'morning_pickup' ? s.pickup_time : s.drop_time) ?? '—',
-                },
-                { title: 'Students', dataIndex: 'student_count', width: 90 },
-              ]}
-            />
-          </div>
-
-          <div>
-            <Typography.Title level={5}>Status history</Typography.Title>
-            <Timeline
-              items={trip.history.map((h) => ({
-                color:
-                  h.to_status === 'cancelled'
-                    ? 'red'
-                    : h.to_status === 'started'
-                      ? 'green'
-                      : 'blue',
-                content: (
-                  <>
-                    <strong>{h.to_status}</strong>
-                    {h.reason && ` · ${h.reason}`}
-                    <br />
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      {new Date(h.created_at).toLocaleString()}
-                      {h.changed_by_name &&
-                        ` · ${h.changed_by_name} (${h.changed_by_role.replace('_', ' ')})`}
-                    </Typography.Text>
-                  </>
-                ),
-              }))}
-            />
-          </div>
-        </Flex>
-      )}
-    </Drawer>
   )
 }

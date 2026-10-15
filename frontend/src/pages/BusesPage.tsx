@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   App,
   Button,
@@ -14,7 +14,7 @@ import {
   Space,
   Table,
 } from 'antd'
-import { DownOutlined, PlusOutlined } from '@ant-design/icons'
+import { CarOutlined, DownOutlined, PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
 import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
@@ -93,7 +93,17 @@ function Buses({ schoolId }: { schoolId: string }) {
         pagination={list.pagination}
         scroll={{ x: 800 }}
         columns={[
-          { title: 'Vehicle number', dataIndex: 'vehicle_number' },
+          {
+            title: 'Vehicle number',
+            render: (_, b) => (
+              <Space size="small">
+                <CarOutlined style={{ color: '#d97706' }} />
+                <Link to={`/buses/${b.id}`} style={{ fontWeight: 500 }}>
+                  {b.vehicle_number}
+                </Link>
+              </Space>
+            ),
+          },
           { title: 'Seats', dataIndex: 'capacity', width: 90 },
           { title: 'Make / model', dataIndex: 'make_model', render: (v: string) => v || '—' },
           { title: 'GPS device', dataIndex: 'gps_device_id', render: (v: string) => v || '—' },
@@ -105,9 +115,12 @@ function Buses({ schoolId }: { schoolId: string }) {
           },
           {
             title: 'Actions',
-            width: 200,
+            width: 250,
             render: (_, b) => (
               <Space size="small">
+                <Link to={`/buses/${b.id}`}>
+                  <Button size="small">View</Button>
+                </Link>
                 <Button size="small" onClick={() => setEditing(b)}>
                   Edit
                 </Button>
@@ -144,7 +157,7 @@ function Buses({ schoolId }: { schoolId: string }) {
   )
 }
 
-function BusForm({
+export function BusForm({
   schoolId,
   bus,
   onClose,

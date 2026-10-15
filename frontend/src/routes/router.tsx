@@ -16,6 +16,8 @@ import NotFoundPage from '../pages/NotFoundPage'
 import ParentsPage from '../pages/ParentsPage'
 import ReportsPage from '../pages/ReportsPage'
 import RouteDetailPage from '../pages/RouteDetailPage'
+import DriverDetailPage from '../pages/DriverDetailPage'
+import BusDetailPage from '../pages/BusDetailPage'
 import RoutesPage from '../pages/RoutesPage'
 import SchoolsPage from '../pages/SchoolsPage'
 import SettingsPage from '../pages/SettingsPage'
@@ -81,6 +83,22 @@ export const router = createBrowserRouter([
         element: (
           <RoleGate roles={['super_admin', 'school_admin', 'transport_manager']}>
             <RouteDetailPage />
+          </RoleGate>
+        ),
+      },
+      {
+        path: 'drivers/:driverId',
+        element: (
+          <RoleGate roles={['super_admin', 'school_admin', 'transport_manager']}>
+            <DriverDetailPage />
+          </RoleGate>
+        ),
+      },
+      {
+        path: 'buses/:busId',
+        element: (
+          <RoleGate roles={['super_admin', 'school_admin', 'transport_manager']}>
+            <BusDetailPage />
           </RoleGate>
         ),
       },

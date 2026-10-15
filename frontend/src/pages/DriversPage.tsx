@@ -1,6 +1,20 @@
 import { useCallback, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { App, Button, Col, Dropdown, Flex, Form, Input, Modal, Row, Space, Table, Tag } from 'antd'
+import {
+  App,
+  Avatar,
+  Button,
+  Col,
+  Dropdown,
+  Flex,
+  Form,
+  Input,
+  Modal,
+  Row,
+  Space,
+  Table,
+  Tag,
+} from 'antd'
 import { DownOutlined, PlusOutlined } from '@ant-design/icons'
 import ListToolbar from '../components/ListToolbar'
 import ListEmpty from '../components/ListEmpty'
@@ -10,6 +24,7 @@ import StatusTag from '../components/StatusTag'
 import { useServerList } from '../hooks/useServerList'
 import { driversApi } from '../services/transport'
 import type { Driver, DriverInput, DriverStatus, ListParams } from '../services/types'
+import { avatarColor, initials } from '../utils/avatar'
 import { applyApiErrors, errorMessage } from '../utils/formErrors'
 
 const STATUSES: DriverStatus[] = ['active', 'inactive', 'suspended']
@@ -85,7 +100,17 @@ function Drivers({ schoolId }: { schoolId: string }) {
         pagination={list.pagination}
         scroll={{ x: 900 }}
         columns={[
-          { title: 'Name', dataIndex: 'name' },
+          {
+            title: 'Name',
+            render: (_, d) => (
+              <Space size="small">
+                <Avatar size="small" style={{ background: avatarColor(d.id) }}>
+                  {initials(d.name)}
+                </Avatar>
+                <Link to={`/drivers/${d.id}`}>{d.name}</Link>
+              </Space>
+            ),
+          },
           { title: 'Mobile', dataIndex: 'mobile' },
           {
             title: 'Licence',
@@ -109,9 +134,12 @@ function Drivers({ schoolId }: { schoolId: string }) {
           },
           {
             title: 'Actions',
-            width: 200,
+            width: 270,
             render: (_, d) => (
               <Space size="small">
+                <Link to={`/drivers/${d.id}`}>
+                  <Button size="small">View</Button>
+                </Link>
                 <Button size="small" onClick={() => setEditing(d)}>
                   Edit
                 </Button>
@@ -158,14 +186,14 @@ function Drivers({ schoolId }: { schoolId: string }) {
 const today = new Date().toISOString().slice(0, 10)
 const in30Days = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)
 
-function LicenseExpiry({ date }: { date: string | null }) {
+export function LicenseExpiry({ date }: { date: string | null }) {
   if (!date) return null
   if (date < today) return <Tag color="red">Expired {date}</Tag>
   if (date <= in30Days) return <Tag color="orange">Expires {date}</Tag>
   return <Tag>Valid to {date}</Tag>
 }
 
-function DriverForm({
+export function DriverForm({
   schoolId,
   driver,
   onClose,

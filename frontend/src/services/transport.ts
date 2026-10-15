@@ -18,6 +18,7 @@ const school = (schoolId: string) => `/api/v1/schools/${schoolId}`
 export const driversApi = {
   list: (schoolId: string, params: ListParams) =>
     getPage<Driver>(`${school(schoolId)}/drivers`, params),
+  get: (schoolId: string, id: string) => getData<Driver>(`${school(schoolId)}/drivers/${id}`),
   create: (schoolId: string, input: DriverInput) =>
     send<Driver>('post', `${school(schoolId)}/drivers`, input),
   update: (schoolId: string, id: string, input: DriverInput) =>
@@ -28,6 +29,7 @@ export const driversApi = {
 
 export const busesApi = {
   list: (schoolId: string, params: ListParams) => getPage<Bus>(`${school(schoolId)}/buses`, params),
+  get: (schoolId: string, id: string) => getData<Bus>(`${school(schoolId)}/buses/${id}`),
   create: (schoolId: string, input: BusInput) =>
     send<Bus>('post', `${school(schoolId)}/buses`, input),
   update: (schoolId: string, id: string, input: BusInput) =>
@@ -59,5 +61,7 @@ export const routesApi = {
     send<Stop[]>('put', `${route(schoolId, routeId)}/stops/order`, { stop_ids: stopIds }),
   /** Evening Drop's own travel order, independent of reorderStops (Morning Pickup). */
   reorderDropSequence: (schoolId: string, routeId: string, dropStopIds: string[]) =>
-    send<Stop[]>('put', `${route(schoolId, routeId)}/stops/drop-order`, { drop_stop_ids: dropStopIds }),
+    send<Stop[]>('put', `${route(schoolId, routeId)}/stops/drop-order`, {
+      drop_stop_ids: dropStopIds,
+    }),
 }
