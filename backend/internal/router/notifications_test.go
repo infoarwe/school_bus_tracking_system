@@ -12,21 +12,71 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/notify"
 )
 
-// fakePush records pushes instead of calling FCM.
+// fakePush is both a notify.Sender and a notify.TopicSubscriber: it records
+// topic sends instead of calling FCM, and tracks subscriptions in memory
+// exactly like Firebase would (so tests can assert "device X would have
+// received this" by checking real subscription state populated by the real
+// reconciliation code, not by guessing).
 type fakePush struct {
 	mu   sync.Mutex
 	sent []notify.Push
-	fail map[string]error // token → error to return instead of sending
+	fail map[string]error // topic → error to return instead of sending
+
+	subs            map[string]map[string]bool // token -> topic -> subscribed
+	failSubscribe   map[string]bool             // token -> SubscribeTokens reports this token as failed
+	failUnsubscribe map[string]bool             // token -> UnsubscribeTokens reports this token as failed
+	subscribeCalls  int                         // number of (token,topic) pairs actually sent to SubscribeTokens (not no-ops)
 }
 
 func (f *fakePush) Send(_ context.Context, p notify.Push) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.fail[p.Token]; err != nil {
+	if err := f.fail[p.Topic]; err != nil {
 		return err
 	}
 	f.sent = append(f.sent, p)
 	return nil
+}
+
+func (f *fakePush) SubscribeTokens(_ context.Context, tokens []string, topic string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribeCalls++
+	if f.subs == nil {
+		f.subs = map[string]map[string]bool{}
+	}
+	var failed []string
+	for _, tok := range tokens {
+		if f.failSubscribe[tok] {
+			failed = append(failed, tok)
+			continue
+		}
+		if f.subs[tok] == nil {
+			f.subs[tok] = map[string]bool{}
+		}
+		f.subs[tok][topic] = true
+	}
+	return failed, nil
+}
+
+func (f *fakePush) UnsubscribeTokens(_ context.Context, tokens []string, topic string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var failed []string
+	for _, tok := range tokens {
+		if f.failUnsubscribe[tok] {
+			failed = append(failed, tok)
+			continue
+		}
+		delete(f.subs[tok], topic)
+	}
+	return failed, nil
+}
+
+func (f *fakePush) subscribed(token, topic string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subs[token] != nil && f.subs[token][topic]
 }
 
 // flushPushes runs the push worker until the queue is empty and returns what was sent.
@@ -48,11 +98,14 @@ func (e *env) flushPushes() []notify.Push {
 	return out
 }
 
-// pushesTo returns "type:title|body" for each push to a device token.
-func pushesTo(ps []notify.Push, token string) []string {
+// pushesTo returns "type:title|body" for each push whose topic this device is
+// (really, per the fake's tracked subscription state) subscribed to — i.e.
+// exactly what that device would have received, driven by the real
+// reconciliation code via e.registerDevice, not by a token tag on the push.
+func (e *env) pushesTo(ps []notify.Push, token string) []string {
 	var out []string
 	for _, p := range ps {
-		if p.Token == token {
+		if e.pushes.subscribed(token, p.Topic) {
 			out = append(out, p.Data["type"]+":"+p.Title+"|"+p.Body)
 		}
 	}
@@ -99,19 +152,27 @@ func TestAutomaticNotifications(t *testing.T) {
 
 	e.do("POST", "/api/v1/driver/trips/"+f.tripID+"/confirm", f.driver1Tok, nil)
 	e.do("POST", "/api/v1/driver/trips/"+f.tripID+"/start", f.driver1Tok, nil)
+	// Titles are no longer personalised with the child's name (e.g. "Asha · Bus
+	// started") — a topic send reaches every subscriber of that topic in one
+	// call, and different parents on the same route/stop topic have different
+	// children, so no single title can name "the" child. This is an inherent,
+	// deliberate trade-off of topic-only delivery, not an oversight.
 	sent := e.flushPushes()
-	if a := pushesTo(sent, f.deviceA); len(a) != 1 || !strings.HasPrefix(a[0], "bus_started:Asha · Bus started|") {
+	if a := e.pushesTo(sent, f.deviceA); len(a) != 1 || !strings.HasPrefix(a[0], "bus_started:Bus started|") {
 		t.Fatalf("bus started to A: %v", a)
 	}
 
 	at := e.drive(f.tripFixture, f.tripID, 11.000, 11.0045, time.Now()) // through Alpha, into Bravo
 	sent = e.flushPushes()
-	a := pushesTo(sent, f.deviceA)
-	if len(a) != 2 || !strings.Contains(a[0], "Bus is approaching your stop. Estimated arrival:") || a[1] != "bus_reached:Asha · Bus at your stop|Bus reached your stop." {
+	a := e.pushesTo(sent, f.deviceA)
+	if len(a) != 2 || !strings.Contains(a[0], "Bus is approaching your stop. Estimated arrival:") || a[1] != "bus_reached:Bus at your stop|Bus reached your stop." {
 		t.Fatalf("A at Bravo: %v", a)
 	}
-	// Parent B's child uses Charlie: nothing about Bravo (or Alpha, which nobody uses).
-	if b := pushesTo(sent, f.deviceB); len(b) != 0 {
+	// Parent B's child uses Charlie: nothing about Bravo (or Alpha, which nobody uses) —
+	// proven here by B's device never having been subscribed to Bravo's stop topic
+	// (real reconciliation state, not a guess), which is exactly the tenant/privacy
+	// guarantee rule 6 and the Phase 1 audit's stop-granularity finding depend on.
+	if b := e.pushesTo(sent, f.deviceB); len(b) != 0 {
 		t.Errorf("B got Bravo pushes: %v", b)
 	}
 
@@ -119,10 +180,10 @@ func TestAutomaticNotifications(t *testing.T) {
 	e.expect(e.do("POST", "/api/v1/auth/logout", f.parentB, nil), 204, "")
 	e.drive(f.tripFixture, f.tripID, 11.00475, 11.0085, at) // past Bravo and Charlie, into school
 	sent = e.flushPushes()
-	if a := pushesTo(sent, f.deviceA); len(a) != 2 || !strings.HasPrefix(a[0], "bus_crossed:") || !strings.HasPrefix(a[1], "school_reached:") {
+	if a := e.pushesTo(sent, f.deviceA); len(a) != 2 || !strings.HasPrefix(a[0], "bus_crossed:") || !strings.HasPrefix(a[1], "school_reached:") {
 		t.Errorf("A after Bravo: %v", a)
 	}
-	if b := pushesTo(sent, f.deviceB); len(b) != 0 {
+	if b := e.pushesTo(sent, f.deviceB); len(b) != 0 {
 		t.Errorf("logged-out device got pushes: %v", b)
 	}
 	// ...but B's inbox still has the Charlie notifications.
@@ -134,7 +195,7 @@ func TestAutomaticNotifications(t *testing.T) {
 	}
 
 	e.expect(e.do("POST", "/api/v1/driver/trips/"+f.tripID+"/end", f.driver1Tok, nil), 200, "")
-	if a := pushesTo(e.flushPushes(), f.deviceA); len(a) != 1 || !strings.HasPrefix(a[0], "trip_completed:") {
+	if a := e.pushesTo(e.flushPushes(), f.deviceA); len(a) != 1 || !strings.HasPrefix(a[0], "trip_completed:") {
 		t.Errorf("trip completed: %v", a)
 	}
 
@@ -207,11 +268,11 @@ func TestDelaysAndEmergencies(t *testing.T) {
 	d := e.do("POST", delays, f.driver1Tok, map[string]any{"minutes": 15, "reason": "traffic", "note": "Signal not working"})
 	e.expect(d, 201, "")
 	sent := e.flushPushes()
-	want := "bus_delayed:Asha · Bus delayed|Bus Delayed by 15 Minutes. Please expect a delay in reaching your pickup location."
-	if a := pushesTo(sent, f.deviceA); len(a) != 1 || a[0] != want {
+	want := "bus_delayed:Bus delayed|Bus Delayed by 15 Minutes. Please expect a delay in reaching your pickup location."
+	if a := e.pushesTo(sent, f.deviceA); len(a) != 1 || a[0] != want {
 		t.Errorf("delay push to A: %v", a)
 	}
-	if len(pushesTo(sent, f.deviceB)) != 1 {
+	if len(e.pushesTo(sent, f.deviceB)) != 1 {
 		t.Error("every parent on the trip should hear about a delay")
 	}
 	if m := staff.next("alert"); m["alert"].(map[string]any)["kind"] != "delay" {
@@ -220,7 +281,7 @@ func TestDelaysAndEmergencies(t *testing.T) {
 
 	// Breakdown, reported by the Transport Manager.
 	e.expect(e.do("POST", f.base+"/trips/"+f.tripID+"/delays", f.tm, map[string]any{"minutes": 30, "reason": "bus_breakdown"}), 201, "")
-	if a := pushesTo(e.flushPushes(), f.deviceA); len(a) != 1 || !strings.Contains(a[0], "Your school bus has experienced a breakdown") {
+	if a := e.pushesTo(e.flushPushes(), f.deviceA); len(a) != 1 || !strings.Contains(a[0], "Your school bus has experienced a breakdown") {
 		t.Errorf("breakdown push: %v", a)
 	}
 	staff.next("alert")
@@ -231,7 +292,7 @@ func TestDelaysAndEmergencies(t *testing.T) {
 	if m := staff.next("alert"); m["alert"].(map[string]any)["kind"] != "emergency" {
 		t.Errorf("emergency alert: %v", m)
 	}
-	if len(pushesTo(e.flushPushes(), f.deviceA)) != 0 {
+	if len(e.pushesTo(e.flushPushes(), f.deviceA)) != 0 {
 		t.Error("emergencies must not be pushed to parents automatically")
 	}
 	// The parent watching the trip got the delay pushes but must never get staff alerts.
@@ -281,7 +342,7 @@ func TestAnnouncements(t *testing.T) {
 		t.Fatalf("school announcement: %v", sent.data())
 	}
 	ps := e.flushPushes()
-	if len(pushesTo(ps, f.deviceA)) != 1 || len(pushesTo(ps, f.deviceB)) != 1 {
+	if len(e.pushesTo(ps, f.deviceA)) != 1 || len(e.pushesTo(ps, f.deviceB)) != 1 {
 		t.Errorf("school-wide pushes: %v", ps)
 	}
 
@@ -293,8 +354,11 @@ func TestAnnouncements(t *testing.T) {
 	}
 	e.expect(e.do("POST", ann, f.tm, map[string]any{"category": "traffic_delay", "target": "route", "route_id": f.route,
 		"title": "Traffic", "message": "Expect delays"}), 201, "")
-	if ps := e.flushPushes(); len(ps) != 2 {
-		t.Errorf("route announcement pushes = %d, want 2", len(ps))
+	// One topic send (not one per device — Firebase itself fans out to every
+	// subscriber), but it must still reach both of this route's parents.
+	ps = e.flushPushes()
+	if len(ps) != 1 || len(e.pushesTo(ps, f.deviceA)) != 1 || len(e.pushesTo(ps, f.deviceB)) != 1 {
+		t.Errorf("route announcement pushes: %v", ps)
 	}
 
 	// Scheduled: not sent until due; can be cancelled before.
@@ -311,8 +375,8 @@ func TestAnnouncements(t *testing.T) {
 	if err := e.api.SendDueAnnouncements(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.flushPushes()) != 2 {
-		t.Error("due scheduled announcement was not sent")
+	if sent := e.flushPushes(); len(sent) != 1 {
+		t.Errorf("due scheduled announcement was not sent: %v", sent)
 	}
 	list := e.do("GET", ann, f.tm, nil)
 	if n := len(list.list()); n != 5 {
@@ -321,38 +385,84 @@ func TestAnnouncements(t *testing.T) {
 	e.expect(e.do("POST", ann, f.admin, map[string]any{"category": "other", "target": "route", "title": "x", "message": "y"}), 400, "validation_failed")
 }
 
-func TestPushRetryAndInvalidToken(t *testing.T) {
+// TestTopicDeliveryRetry: a topic send is a single dispatch per notification
+// (not per device, since Firebase itself fans out to every subscriber) — so a
+// transient failure and its retry apply to the whole topic_deliveries row,
+// not to one device's token the way the old per-device model worked.
+func TestTopicDeliveryRetry(t *testing.T) {
 	e := newEnv(t)
 	f := newNotifyFixture(e)
-	e.pushes.fail = map[string]error{f.deviceA: errors.New("fcm: 503 unavailable"), f.deviceB: notify.ErrInvalidToken}
+	routeTopic, err := notify.RouteTopic(f.school, f.route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.pushes.fail = map[string]error{routeTopic: errors.New("fcm: 503 unavailable")}
 	e.do("POST", "/api/v1/driver/trips/"+f.tripID+"/confirm", f.driver1Tok, nil)
 	e.do("POST", "/api/v1/driver/trips/"+f.tripID+"/start", f.driver1Tok, nil)
 	e.flushPushes()
 
-	status := func(token string) (st string, attempts int) {
-		_ = e.pool.QueryRow(context.Background(), `SELECT status, attempts FROM push_deliveries WHERE token = $1`, token).Scan(&st, &attempts)
+	status := func(topic string) (st string, attempts int) {
+		_ = e.pool.QueryRow(context.Background(), `SELECT status, attempts FROM topic_deliveries WHERE topic = $1`, topic).Scan(&st, &attempts)
 		return
 	}
-	// A temporary failure is retried later; an invalid token is dropped for good.
-	if st, n := status(f.deviceA); st != "pending" || n != 1 {
-		t.Errorf("A: %s after %d attempts, want pending retry", st, n)
+	if st, n := status(routeTopic); st != "pending" || n != 1 {
+		t.Errorf("route topic: %s after %d attempts, want pending retry", st, n)
 	}
-	if st, _ := status(f.deviceB); st != "invalid" {
-		t.Errorf("B: %s, want invalid", st)
-	}
-	var devices int
-	_ = e.pool.QueryRow(context.Background(), `SELECT count(*) FROM device_tokens WHERE token = $1`, f.deviceB).Scan(&devices)
-	if devices != 0 {
-		t.Error("an invalid token must be deleted")
+	// Nothing reached either device while the send was failing.
+	if a := e.pushesTo(e.flushPushes(), f.deviceA); len(a) != 0 {
+		t.Errorf("A received something despite the send failure: %v", a)
 	}
 
-	// When the retry is due and FCM works again, it is delivered.
+	// When the retry is due and FCM works again, it is delivered — to every
+	// subscriber of that topic in one send, i.e. both A and B (both ride this route).
 	e.pushes.fail = nil
-	_, _ = e.pool.Exec(context.Background(), `UPDATE push_deliveries SET next_attempt_at = now() WHERE token = $1`, f.deviceA)
-	if len(pushesTo(e.flushPushes(), f.deviceA)) != 1 {
-		t.Error("retry was not sent")
+	_, _ = e.pool.Exec(context.Background(), `UPDATE topic_deliveries SET next_attempt_at = now() WHERE topic = $1`, routeTopic)
+	sent := e.flushPushes()
+	if a := e.pushesTo(sent, f.deviceA); len(a) != 1 {
+		t.Error("retry was not sent to A")
 	}
-	if st, n := status(f.deviceA); st != "sent" || n != 2 {
-		t.Errorf("A: %s after %d attempts", st, n)
+	if b := e.pushesTo(sent, f.deviceB); len(b) != 1 {
+		t.Error("retry was not sent to B")
+	}
+	if st, n := status(routeTopic); st != "sent" || n != 2 {
+		t.Errorf("route topic: %s after %d attempts", st, n)
+	}
+}
+
+// TestSubscribeFailureNotRecorded: if Firebase reports a token as failed
+// during a subscribe call, that token must not be recorded as subscribed —
+// otherwise a later notification would be believed delivered to a device it
+// never actually reached, and a genuinely-failed subscribe would never be
+// retried (see Phase 2 spec requirement: "Firebase subscription API failures
+// are not recorded as successful subscriptions").
+func TestSubscribeFailureNotRecorded(t *testing.T) {
+	e := newEnv(t)
+	f := newNotifyFixture(e)
+	schoolTopic, err := notify.SchoolTopic(f.school)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fresh token (simulating B's app getting a new FCM token after a
+	// reinstall) that Firebase rejects on first subscribe — no prior state to
+	// get confused with, unlike reusing an already-subscribed device.
+	newToken := "fcm-token-parent-B-rotated-0000000003"
+	e.pushes.failSubscribe = map[string]bool{newToken: true}
+	e.registerDevice(f.parentB, newToken)
+
+	if e.pushes.subscribed(newToken, schoolTopic) {
+		t.Error("a token Firebase reported as failed must not be tracked as subscribed in the fake")
+	}
+	var tracked int
+	_ = e.pool.QueryRow(context.Background(), `SELECT count(*) FROM device_topic_subscriptions WHERE token = $1`, newToken).Scan(&tracked)
+	if tracked != 0 {
+		t.Errorf("ledger has %d rows for a token whose subscribe failed, want 0", tracked)
+	}
+
+	// Once Firebase accepts it again, a later reconciliation (another register
+	// call) succeeds normally.
+	e.pushes.failSubscribe = nil
+	e.registerDevice(f.parentB, newToken)
+	if !e.pushes.subscribed(newToken, schoolTopic) {
+		t.Error("B should be subscribed once Firebase stops rejecting the token")
 	}
 }

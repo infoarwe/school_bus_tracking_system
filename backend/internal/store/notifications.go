@@ -18,6 +18,19 @@ type NotificationInput struct {
 	RouteID   *string
 	DedupeKey *string // automatic notifications: fires once per key
 	CreatedBy *string
+
+	// StopID, if set, routes this notification to the stop-specific topic
+	// (school_{school}_route_{route}_stop_{stop}) instead of the route-wide
+	// one — approaching/reached/crossed only. Not persisted as a notifications
+	// column (it's already carried in Data["stop_id"] for the client); it only
+	// steers which topic Notify dispatches to.
+	StopID *string
+	// StaffOnly marks a notification that has no parent-facing topic at all
+	// (route claim/release): it still creates inbox rows for staff recipients,
+	// but Notify deliberately sends no topic_deliveries row rather than
+	// guessing a topic — staff have no supported push subscription path, and
+	// routing it to the route topic would leak staff-ops messages to parents.
+	StaffOnly bool
 }
 
 // InsertNotification returns created=false if a notification with the same
@@ -296,6 +309,11 @@ type DeliveryStats struct {
 	Failed     int `json:"failed"` // failed + invalid tokens
 }
 
+// NotificationStats summarises one notification's reach. Sent/Pending/Failed
+// come from topic_deliveries (one row per topic, not per device — a topic
+// reaches every subscriber in a single Firebase call). Pre-migration
+// notifications have no topic_deliveries row and report 0/0/0 here; their
+// history remains in push_deliveries for direct inspection if needed.
 func NotificationStats(ctx context.Context, q DBTX, notificationID string) (*DeliveryStats, error) {
 	var s DeliveryStats
 	err := q.QueryRow(ctx, `
@@ -303,8 +321,8 @@ func NotificationStats(ctx context.Context, q DBTX, notificationID string) (*Del
 			(SELECT count(DISTINCT user_id) FROM notification_recipients WHERE notification_id = $1 AND read_at IS NOT NULL),
 			count(*) FILTER (WHERE status = 'sent'),
 			count(*) FILTER (WHERE status = 'pending'),
-			count(*) FILTER (WHERE status IN ('failed', 'invalid'))
-		FROM push_deliveries WHERE notification_id = $1`, notificationID).
+			count(*) FILTER (WHERE status IN ('failed', 'config_missing'))
+		FROM topic_deliveries WHERE notification_id = $1`, notificationID).
 		Scan(&s.Recipients, &s.Read, &s.Sent, &s.Pending, &s.Failed)
 	return &s, err
 }

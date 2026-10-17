@@ -200,8 +200,8 @@ var Reports = []ReportDef{
 		Columns: cols("sent_at", "Sent at", "type", "Type", "title", "Title", "route", "Route", "recipients", "Parents",
 			"pushed", "Pushed", "failed", "Failed", "read", "Read"),
 		sql: `SELECT ` + lt("n.created_at") + `, n.type, n.title, coalesce(r.code, 'Whole school'), n.recipient_count,
-				(SELECT count(*) FROM push_deliveries p WHERE p.notification_id = n.id AND p.status = 'sent'),
-				(SELECT count(*) FROM push_deliveries p WHERE p.notification_id = n.id AND p.status IN ('failed', 'invalid')),
+				(SELECT count(*) FROM topic_deliveries p WHERE p.notification_id = n.id AND p.status = 'sent'),
+				(SELECT count(*) FROM topic_deliveries p WHERE p.notification_id = n.id AND p.status IN ('failed', 'config_missing')),
 				(SELECT count(DISTINCT user_id) FROM notification_recipients nr WHERE nr.notification_id = n.id AND nr.read_at IS NOT NULL)
 			FROM notifications n JOIN schools s ON s.id = n.school_id LEFT JOIN routes r ON r.id = n.route_id
 			WHERE n.school_id = $1 AND (n.created_at AT TIME ZONE s.timezone)::date BETWEEN $2::date AND $3::date

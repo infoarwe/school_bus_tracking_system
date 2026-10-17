@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -71,10 +72,16 @@ func (a *API) notifyTrip(ctx context.Context, t *models.Trip, typ string, msg no
 	for k, v := range extra {
 		data[k] = v
 	}
-	_, _, err = notify.Notify(ctx, a.Store.Pool, store.NotificationInput{
+	n := store.NotificationInput{
 		SchoolID: t.SchoolID, Type: typ, Title: msg.Title, Body: msg.Body, Data: data,
 		TripID: &t.ID, RouteID: routeIDPtr(t), DedupeKey: &dedupe,
-	}, riders)
+	}
+	// Special Trip/Outing riders are always the whole route (tripRiders ignores
+	// stopID for it) — the topic must match, so never narrow to a stop topic here.
+	if stopID != "" && t.TripType != models.TripSpecial {
+		n.StopID = &stopID
+	}
+	_, _, err = notify.Notify(ctx, a.Store.Pool, n, riders)
 	return err
 }
 
@@ -169,6 +176,13 @@ func (a *API) RegisterDevice(w http.ResponseWriter, r *http.Request) {
 		internalError(w, r, err)
 		return
 	}
+	// Best-effort: subscription reconciliation never blocks registration (the
+	// same "never block on Google/Firebase" philosophy as elsewhere in this
+	// API). A failure here self-heals on the next register/rotation, login, or
+	// assignment change, which all recompute the full desired set from scratch.
+	if err := a.reconcileDeviceTopics(r.Context(), p, req.Token); err != nil {
+		slog.Warn("topic subscription reconcile failed", "err", err, "user_id", p.UserID)
+	}
 	httpx.NoContent(w)
 }
 
@@ -181,11 +195,104 @@ func (a *API) UnregisterDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := auth.FromContext(r.Context())
-	if err := store.DeleteUserDeviceToken(r.Context(), a.Store.Pool, p.UserID, strings.TrimSpace(req.Token)); err != nil {
+	token := strings.TrimSpace(req.Token)
+	// Unsubscribe before deleting the registration, so a removed device never
+	// keeps receiving topic pushes it can no longer be reached by. Best-effort
+	// (never blocks logout) but still attempted first, not skipped.
+	if a.Senders != nil && p.Role == models.RoleParent {
+		if info, ok, err := store.ParentTopicInfo(r.Context(), a.Store.Pool, p.UserID); err != nil {
+			slog.Warn("topic unsubscribe lookup failed", "err", err, "user_id", p.UserID)
+		} else if ok {
+			if err := notify.UnsubscribeAllForToken(r.Context(), a.Store.Pool, a.Senders, info.SchoolID, token); err != nil {
+				slog.Warn("topic unsubscribe failed", "err", err, "user_id", p.UserID)
+			}
+		}
+	}
+	if err := store.DeleteUserDeviceToken(r.Context(), a.Store.Pool, p.UserID, token); err != nil {
 		internalError(w, r, err)
 		return
 	}
 	httpx.NoContent(w)
+}
+
+// reconcileDeviceTopics subscribes token to exactly the topics the caller is
+// currently authorized for, derived solely from their own school/assignment
+// records (store.ParentTopicInfo) — never from anything the client asserts.
+// A no-op for non-parents (drivers/staff have no topic model today) or when
+// Senders isn't configured (tests).
+func (a *API) reconcileDeviceTopics(ctx context.Context, p *auth.Principal, token string) error {
+	if a.Senders == nil || p.Role != models.RoleParent {
+		return nil
+	}
+	return a.reconcileUserTopics(ctx, p.UserID, token)
+}
+
+// reconcileUserTopics recomputes one parent's desired topic set and
+// reconciles exactly one of their device tokens against it.
+func (a *API) reconcileUserTopics(ctx context.Context, userID, token string) error {
+	info, ok, err := store.ParentTopicInfo(ctx, a.Store.Pool, userID)
+	if err != nil || !ok {
+		return err
+	}
+	desired, err := notify.ComputeDesiredTopics(info)
+	if err != nil {
+		return err
+	}
+	return notify.ReconcileToken(ctx, a.Store.Pool, a.Senders, info.SchoolID, token, desired)
+}
+
+// reconcileParentTopics reconciles every active device of one parent (by
+// user_id) — called after their linked children change (setChildren), since
+// unlinking a child must drop topics no longer needed by any remaining child,
+// and ReconcileToken's desired-vs-tracked diff already handles that correctly
+// without needing to know the old list.
+func (a *API) reconcileParentTopics(ctx context.Context, userID string) {
+	if a.Senders == nil {
+		return
+	}
+	tokensByUser, err := store.ActiveDeviceTokens(ctx, a.Store.Pool, []string{userID})
+	if err != nil {
+		slog.Warn("topic reconcile: load device tokens failed", "err", err, "user_id", userID)
+		return
+	}
+	for _, token := range tokensByUser[userID] {
+		if err := a.reconcileUserTopics(ctx, userID, token); err != nil {
+			slog.Warn("topic reconcile failed", "err", err, "user_id", userID)
+		}
+	}
+}
+
+// reconcileStudentParentsTopics reconciles every active device of every
+// parent linked to studentID — called after a student's route/stop
+// assignment changes (AssignStudent, UnassignStudent), since that changes
+// what every one of their parents' devices should be subscribed to. Best-
+// effort: logs failures rather than surfacing them to the admin request that
+// triggered the change (the DB write, which is authoritative, already
+// succeeded by the time this runs).
+func (a *API) reconcileStudentParentsTopics(ctx context.Context, studentID string) {
+	if a.Senders == nil {
+		return
+	}
+	userIDs, err := store.ParentUserIDsForStudent(ctx, a.Store.Pool, studentID)
+	if err != nil {
+		slog.Warn("topic reconcile: load parents failed", "err", err, "student_id", studentID)
+		return
+	}
+	if len(userIDs) == 0 {
+		return
+	}
+	tokensByUser, err := store.ActiveDeviceTokens(ctx, a.Store.Pool, userIDs)
+	if err != nil {
+		slog.Warn("topic reconcile: load device tokens failed", "err", err, "student_id", studentID)
+		return
+	}
+	for userID, tokens := range tokensByUser {
+		for _, token := range tokens {
+			if err := a.reconcileUserTopics(ctx, userID, token); err != nil {
+				slog.Warn("topic reconcile failed", "err", err, "user_id", userID)
+			}
+		}
+	}
 }
 
 // --- Parent inbox ---

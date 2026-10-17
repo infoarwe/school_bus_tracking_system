@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/subtle"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/auth"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/httpx"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/models"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/notify"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/store"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/validate"
 )
@@ -340,6 +342,22 @@ func (a *API) Logout(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		internalError(w, r, err)
 		return
+	}
+	// Topic delivery has no notion of "session" at send time the way the old
+	// per-device-token fan-out did (ActiveDeviceTokens filtered by session
+	// there-and-then); a bare logout must still stop pushes to this device, so
+	// unsubscribe it from its topics here rather than relying on the app also
+	// calling POST /devices/unregister. Best-effort: never fails the logout.
+	if a.Senders != nil && p.Role == models.RoleParent && p.SchoolID != nil {
+		if tokens, err := store.DeviceTokensForSession(r.Context(), a.Store.Pool, p.SessionID); err != nil {
+			slog.Warn("topic unsubscribe on logout: load tokens failed", "err", err, "user_id", p.UserID)
+		} else {
+			for _, tok := range tokens {
+				if err := notify.UnsubscribeAllForToken(r.Context(), a.Store.Pool, a.Senders, *p.SchoolID, tok); err != nil {
+					slog.Warn("topic unsubscribe on logout failed", "err", err, "user_id", p.UserID)
+				}
+			}
+		}
 	}
 	httpx.NoContent(w)
 }

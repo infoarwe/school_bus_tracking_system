@@ -15,6 +15,7 @@ import (
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/auth"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/httpx"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/middleware"
+	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/notify"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/ratelimit"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/secrets"
 	"github.com/pavithra-thiyagarajan/school-bus-tracking/backend/internal/storage"
@@ -46,6 +47,11 @@ type API struct {
 	// Files stores uploads (school logos); MaxLogoBytes caps a logo upload.
 	Files        storage.Store
 	MaxLogoBytes int64
+	// Senders resolves each school's Firebase project, for topic subscription
+	// management (RegisterDevice/UnregisterDevice and assignment-change
+	// reconciliation) — the same per-school cache internal/notify.Worker sends
+	// through.
+	Senders notify.Senders
 
 	OTPTTL time.Duration
 	// IsProduction gates SendOTP's development_otp response field (outside production only).

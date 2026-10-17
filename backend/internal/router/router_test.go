@@ -111,6 +111,7 @@ func newEnv(t *testing.T) *env {
 		Files:                files,
 		MaxLogoBytes:         testMaxLogoBytes,
 		RequireSuperAdmin2FA: true,
+		Senders:              notify.Static{Sender: pushes},
 	}
 	srv := router.New(router.Deps{Health: &handlers.HealthHandler{}, API: api, RequireSuperAdmin2FA: true})
 	return &env{t: t, srv: srv, pool: pool, live: live, redis: mr, eta: eta, pushes: pushes, api: api,

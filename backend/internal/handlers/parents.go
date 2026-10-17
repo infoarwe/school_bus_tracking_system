@@ -152,6 +152,7 @@ func (a *API) CreateParent(w http.ResponseWriter, r *http.Request) {
 		parentSaveError(w, r, err)
 		return
 	}
+	a.reconcileParentTopics(ctx, p.UserID)
 	httpx.JSON(w, http.StatusCreated, p)
 }
 
@@ -198,6 +199,7 @@ func (a *API) UpdateParent(w http.ResponseWriter, r *http.Request) {
 		parentSaveError(w, r, err)
 		return
 	}
+	a.reconcileParentTopics(ctx, after.UserID)
 	httpx.JSON(w, http.StatusOK, after)
 }
 

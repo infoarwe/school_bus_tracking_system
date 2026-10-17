@@ -326,6 +326,7 @@ func (a *API) AssignStudent(w http.ResponseWriter, r *http.Request) {
 		storeError(w, r, err, nil)
 		return
 	}
+	a.reconcileStudentParentsTopics(r.Context(), id)
 	httpx.JSON(w, http.StatusOK, after)
 }
 
@@ -363,6 +364,7 @@ func (a *API) UnassignStudent(w http.ResponseWriter, r *http.Request) {
 		storeError(w, r, err, nil)
 		return
 	}
+	a.reconcileStudentParentsTopics(r.Context(), id)
 	httpx.NoContent(w)
 }
 

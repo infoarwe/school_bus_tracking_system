@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.16.0
+  version: 0.17.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -87,11 +87,19 @@ info:
     - **Each school has its own branded apps and its own Firebase project.** Build each school's app with
       that school's `google-services.json`; the school uploads the matching service-account key in the admin web
       (Settings → Push notifications), and the server sends that school's pushes through it.
-    - After login, and whenever FCM issues a new token, call `POST /devices` with `{token, platform}`. The device
-      is tied to that login: after logout or suspension it receives nothing. `POST /devices/unregister` removes it.
-    - **No FCM topics.** The server sends each push to the registered device tokens of the parents who should
-      get it (their own child's trip, route or school). Do not subscribe to topics: a topic cannot check who is
-      logged in, so it would leak one route's or child's alerts to other phones.
+    - After login, and whenever FCM issues a new token, call `POST /devices` with `{token, platform}` exactly as
+      before. `POST /devices/unregister` removes it, and logout alone also stops delivery to that device.
+    - **FCM topics, server-subscribed only — apps never call `subscribeToTopic`/`unsubscribeFromTopic`.**
+      `POST /devices` is still the app's *only* job; the server derives that parent's topics from their own
+      linked children's current route/stop assignments (never from anything the client asserts) and subscribes
+      the token itself, using Firebase's Instance ID API with the school's own service-account key. Three tiers,
+      least to most specific: `school_{school_id}` (whole-school announcements), `school_{school_id}_route_{route_id}`
+      (bus started, trip completed/cancelled, school reached, delay, breakdown, route announcements),
+      `school_{school_id}_route_{route_id}_stop_{stop_id}` (approaching/reached/crossed for that stop only — a
+      route-wide topic alone would notify every parent on the route for every stop, which must never happen).
+      Subscriptions are reconciled automatically on device (re)registration, login, and whenever a student's
+      route/stop assignment or parent-child link changes — nothing for the app to implement beyond what it
+      already does.
     - Pushes are FCM messages with `notification` (title, body) and `data`. Android: channel `bus_updates`, high
       priority. Every push has `data.type` and `data.notification_id`; trip pushes add `trip_id`, `route_id`,
       `trip_type`, stop pushes add `stop_id`, `bus_delayed`/`bus_breakdown` add `delay_id`, child-specific pushes add `student_ids` (comma-separated: open that
@@ -101,7 +109,12 @@ info:
       `category` and optionally `attachment_url`).
     - Parents receive stop pushes only for their own child's stop, and each event at most once.
     - The inbox (`GET /parent/notifications`) holds the same items; mark them read with
-      `POST /parent/notifications/read`. `meta.unread` is the badge count.
+      `POST /parent/notifications/read`. `meta.unread` is the badge count. The inbox is unaffected by the
+      topic migration — it was always per-user/per-child, never device-token-based.
+    - A school with no Firebase key of its own, and no server-wide fallback key configured on the server, gets
+      no push delivery at all — never a silent "sent" from a logging fallback. `GET /schools/{id}/announcements`
+      and the `notifications` report surface this as `failed` (internally `config_missing`, distinct from a
+      genuine Firebase-side failure, though both appear as `failed` in these responses today).
     - **Driver app:** report a delay or breakdown with `POST /driver/trips/{id}/delays` (parents of the trip are
       notified), and an emergency with `POST /driver/trips/{id}/emergency` (the school's staff are alerted at once;
       parents are not notified automatically).
@@ -157,6 +170,12 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.17.0: **Push delivery is now topic-based, server-subscribed only** (reverses 0.12.2's documented
+      decision). No app-visible change: `POST /devices`/`POST /devices/unregister` are unchanged; the server
+      now also derives each parent's topics from their own assignment data and manages Firebase subscriptions
+      itself (apps must never call `subscribeToTopic`/`unsubscribeFromTopic` directly). A school with neither
+      its own nor a server-wide fallback Firebase key now gets an explicit `failed`/config-missing delivery
+      status instead of a silently-logged "success".
     - 0.16.0: Settings → Live tracking: `google_eta_refresh_seconds` (default 300, 0 = off, else 5–3600 s). Google ETA is no
       longer asked every minute nor at every stop; ETAs still update on every fix (additive, no app change).
     - 0.15.0: Travelled-route snapshot of completed trips (admin web, additive): `GET/POST

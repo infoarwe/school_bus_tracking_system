@@ -418,6 +418,10 @@ func claimNotification(t *models.Trip, what string) store.NotificationInput {
 			"driver_name": t.Driver.Name, "bus_number": t.Bus.VehicleNumber, "trip_date": t.TripDate,
 			"trip_type": t.TripType, "at": time.Now().UTC().Format(time.RFC3339)},
 		TripID: &t.ID, RouteID: &t.Route.ID, DedupeKey: &key,
+		// Staff (School Admin / Transport Manager) have no topic subscription
+		// model — this must never fall through to the parent-facing route
+		// topic, which would leak staff-ops messages to parents on that route.
+		StaffOnly: true,
 	}
 }
 

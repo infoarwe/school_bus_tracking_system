@@ -102,10 +102,11 @@ func run() error {
 	} else {
 		slog.Info("no server-wide Firebase key: schools without their own key (Settings → Push) only log pushes")
 	}
-	worker := &notify.Worker{Store: st, Senders: &notify.SchoolSenders{
+	senders := &notify.SchoolSenders{
 		Store: st, Secrets: box, Fallback: fallback,
 		NewSender: func(ctx context.Context, raw []byte) (notify.Sender, error) { return notify.NewFCMSenderJSON(ctx, raw) },
-	}}
+	}
+	worker := &notify.Worker{Store: st, Senders: senders}
 	go worker.Run(ctx, 2*time.Second)
 
 	api := &handlers.API{
@@ -125,6 +126,7 @@ func run() error {
 		OTPTTL:               cfg.OTPTTL,
 		IsProduction:         cfg.IsProduction(),
 		RequireSuperAdmin2FA: cfg.RequireSuperAdmin2FA,
+		Senders:              senders,
 	}
 	go jobs.Announcements(ctx, 30*time.Second, api.SendDueAnnouncements)
 
