@@ -79,6 +79,8 @@ type TripFilter struct {
 	RouteID  string
 	DriverID string
 	BusID    string
+	// Ascending lists the earliest date first (upcoming trips); default is newest first.
+	Ascending bool
 }
 
 func ListTrips(ctx context.Context, q DBTX, schoolID string, f TripFilter, p Page) ([]models.Trip, int, error) {
@@ -97,8 +99,11 @@ func ListTrips(ctx context.Context, q DBTX, schoolID string, f TripFilter, p Pag
 	if err := q.QueryRow(ctx, `SELECT count(*) FROM trips t`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := q.Query(ctx, tripSelect+where+
-		` ORDER BY t.trip_date DESC, t.trip_type DESC, r.code LIMIT $10 OFFSET $11`, append(args, p.PageSize, p.Offset())...)
+	order := ` ORDER BY t.trip_date DESC, t.trip_type DESC, r.code`
+	if f.Ascending {
+		order = ` ORDER BY t.trip_date, t.trip_type DESC, r.code`
+	}
+	rows, err := q.Query(ctx, tripSelect+where+order+` LIMIT $10 OFFSET $11`, append(args, p.PageSize, p.Offset())...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -309,4 +314,62 @@ func TripsOnDate(ctx context.Context, q DBTX, schoolID, date string, tripTypes [
 		return nil, err
 	}
 	return scanTrips(rows)
+}
+
+// TripCalendarDay counts one date + trip type's trips (Trip Planner calendar).
+type TripCalendarDay struct {
+	TripDate  string `json:"trip_date"`
+	TripType  string `json:"trip_type"`
+	Assigned  int    `json:"assigned"` // not cancelled: scheduled, confirmed, started or completed
+	Confirmed int    `json:"confirmed"`
+	Started   int    `json:"started"`
+	Completed int    `json:"completed"`
+	Cancelled int    `json:"cancelled"`
+}
+
+// TripCalendar counts a school's trips per date and trip type in an inclusive date range.
+func TripCalendar(ctx context.Context, q DBTX, schoolID, from, to string) ([]TripCalendarDay, error) {
+	rows, err := q.Query(ctx, `
+		SELECT trip_date::text, trip_type,
+			count(*) FILTER (WHERE status <> 'cancelled'),
+			count(*) FILTER (WHERE status = 'confirmed'),
+			count(*) FILTER (WHERE status = 'started'),
+			count(*) FILTER (WHERE status = 'completed'),
+			count(*) FILTER (WHERE status = 'cancelled')
+		FROM trips WHERE school_id = $1 AND trip_date BETWEEN $2::date AND $3::date
+		GROUP BY trip_date, trip_type ORDER BY trip_date, trip_type DESC`, schoolID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TripCalendarDay{}
+	for rows.Next() {
+		var d TripCalendarDay
+		if err := rows.Scan(&d.TripDate, &d.TripType, &d.Assigned, &d.Confirmed, &d.Started, &d.Completed, &d.Cancelled); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// TripSlotClash says which of route, bus or driver already has a (non-cancelled) trip
+// in a date + trip type slot, or "" if the slot is free for all three.
+func TripSlotClash(ctx context.Context, q DBTX, schoolID, date, tripType string, routeID *string, busID, driverID string) (string, error) {
+	var route, bus, driver bool
+	err := q.QueryRow(ctx, `
+		SELECT coalesce(bool_or(route_id = $4), false), coalesce(bool_or(bus_id = $5), false), coalesce(bool_or(driver_id = $6), false)
+		FROM trips WHERE school_id = $1 AND trip_date = $2::date AND trip_type = $3 AND status <> 'cancelled'`,
+		schoolID, date, tripType, routeID, busID, driverID).Scan(&route, &bus, &driver)
+	switch {
+	case err != nil:
+		return "", err
+	case route:
+		return "route already has a trip", nil
+	case bus:
+		return "bus is already on another trip", nil
+	case driver:
+		return "driver is already on another trip", nil
+	}
+	return "", nil
 }

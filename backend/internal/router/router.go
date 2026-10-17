@@ -232,6 +232,8 @@ func New(d Deps) http.Handler {
 						r.Get("/trips", a.ListTrips)
 						r.Post("/trips", a.CreateTrip)
 						r.Post("/trips/copy", a.CopyTrips)
+						r.Post("/trips/bulk", a.BulkCreateTrips)
+						r.Get("/trips/calendar", a.TripCalendar)
 						r.Get("/trips/{tripID}", a.GetTrip)
 						r.Get("/trips/{tripID}/progress", a.TripProgress)
 						r.Post("/trips/{tripID}/delays", a.StaffReportDelay)

@@ -23,6 +23,7 @@ import SchoolsPage from '../pages/SchoolsPage'
 import SettingsPage from '../pages/SettingsPage'
 import StudentImportPage from '../pages/StudentImportPage'
 import StudentsPage from '../pages/StudentsPage'
+import TripPlannerPage from '../pages/TripPlannerPage'
 import TripsPage from '../pages/TripsPage'
 import TwoFactorSetupPage from '../pages/TwoFactorSetupPage'
 import UsersPage from '../pages/UsersPage'
@@ -42,6 +43,7 @@ const pages: Record<string, React.ReactNode> = {
   '/parents': <ParentsPage />,
   '/settings': <SettingsPage />,
   '/trips': <TripsPage />,
+  '/trip-planner': <TripPlannerPage />,
   '/live': <LiveTrackingPage />,
   '/alerts': <AlertsPage />,
   '/announcements': <AnnouncementsPage />,

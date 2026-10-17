@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.17.0
+  version: 0.18.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -170,6 +170,8 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.18.0: Trip Planner (admin web, additive): `POST /schools/{id}/trips/bulk` (one route + bus + driver on many
+      dates), `GET /schools/{id}/trips/calendar` (counts per date and trip type), and `sort=asc` on `GET /trips`.
     - 0.17.0: **Push delivery is now topic-based, server-subscribed only** (reverses 0.12.2's documented
       decision). No app-visible change: `POST /devices`/`POST /devices/unregister` are unchanged; the server
       now also derives each parent's topics from their own assignment data and manages Firebase subscriptions
@@ -1998,9 +2000,10 @@ paths:
         - { name: route_id, in: query, schema: { type: string, format: uuid } }
         - { name: driver_id, in: query, schema: { type: string, format: uuid } }
         - { name: bus_id, in: query, schema: { type: string, format: uuid } }
+        - { name: sort, in: query, description: "`asc` = earliest date first (upcoming trips).", schema: { type: string, enum: [asc] } }
       responses:
         "200":
-          description: Trips, newest date first.
+          description: Trips, newest date first (earliest first with `sort=asc`).
           content:
             application/json:
               schema:
@@ -2070,6 +2073,97 @@ paths:
                             trip_type: { type: string }
                             route_code: { type: string }
                             reason: { type: string }
+
+  /api/v1/schools/{schoolID}/trips/bulk:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    post:
+      tags: [Trips]
+      summary: Assign one route, bus and driver on many dates
+      description: |
+        Plans ahead (Trip Planner): creates a scheduled trip for each date × trip type. Route, bus and driver are
+        checked once, like `POST /trips` (`400` with `fields` if unusable). A date in the past or more than 90 days
+        ahead, or a slot where the route, bus or driver already has a trip, is skipped and listed; existing trips
+        are never changed, so sending the same request again creates nothing. Audited as `trip.bulk_create`.
+      operationId: bulkCreateTrips
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dates, trip_types, route_id, bus_id, driver_id]
+              properties:
+                dates: { type: array, minItems: 1, maxItems: 91, uniqueItems: true, items: { type: string, format: date } }
+                trip_types: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [morning_pickup, evening_drop] } }
+                route_id: { type: string, format: uuid }
+                bus_id: { type: string, format: uuid }
+                driver_id: { type: string, format: uuid }
+                notes: { type: string, maxLength: 500 }
+            example:
+              dates: ["2026-10-19", "2026-10-20", "2026-10-21"]
+              trip_types: [morning_pickup, evening_drop]
+              route_id: 6f1c2a9e-0d1b-4f43-9a51-2b7f7c1d9e10
+              bus_id: 0b8e4c55-6a8f-4e7e-8d3e-5d6f1a2b3c4d
+              driver_id: 9a7d3e21-2c4b-4b8a-a1f0-3e5d7c9b1a2f
+      responses:
+        "200":
+          description: Result (same shape as copy).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      created: { type: integer }
+                      skipped:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            trip_date: { type: string }
+                            trip_type: { type: string }
+                            route_code: { type: string }
+                            reason: { type: string, example: driver is already on another trip }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/schools/{schoolID}/trips/calendar:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    get:
+      tags: [Trips]
+      summary: Trip counts per date and trip type
+      description: For the Trip Planner month view. `from`..`to` inclusive, at most 62 days. Dates with no trips are left out.
+      operationId: tripCalendar
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: One row per date + trip type that has trips.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        trip_date: { type: string, format: date }
+                        trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
+                        assigned: { type: integer, description: Not cancelled }
+                        confirmed: { type: integer }
+                        started: { type: integer }
+                        completed: { type: integer }
+                        cancelled: { type: integer }
+              example:
+                data:
+                  - { trip_date: "2026-10-19", trip_type: morning_pickup, assigned: 2, confirmed: 1, started: 0, completed: 0, cancelled: 0 }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
 
   /api/v1/schools/{schoolID}/trips/{tripID}:
     parameters:

@@ -393,6 +393,30 @@ export interface TripListParams extends ListParams {
   route_id?: string
   driver_id?: string
   bus_id?: string
+  /** asc = earliest date first (upcoming trips); default newest first. */
+  sort?: 'asc'
+}
+
+/** POST /trips/bulk: one route + bus + driver on many dates. */
+export interface BulkTripsInput {
+  dates: string[]
+  trip_types: ('morning_pickup' | 'evening_drop')[]
+  route_id: string
+  bus_id: string
+  driver_id: string
+  notes?: string
+}
+
+/** GET /trips/calendar: trip counts of one date + trip type. */
+export interface TripCalendarDay {
+  trip_date: string
+  trip_type: TripType
+  /** Not cancelled. */
+  assigned: number
+  confirmed: number
+  started: number
+  completed: number
+  cancelled: number
 }
 
 export interface CopyTripsResult {

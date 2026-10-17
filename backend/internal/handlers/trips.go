@@ -269,6 +269,7 @@ func (a *API) ListTrips(w http.ResponseWriter, r *http.Request) {
 	trips, total, err := store.ListTrips(r.Context(), a.Store.Pool, chi.URLParam(r, "schoolID"), store.TripFilter{
 		Date: qs.Get("date"), From: qs.Get("from"), To: qs.Get("to"), TripType: qs.Get("trip_type"),
 		Status: qs.Get("status"), RouteID: qs.Get("route_id"), DriverID: qs.Get("driver_id"), BusID: qs.Get("bus_id"),
+		Ascending: qs.Get("sort") == "asc",
 	}, pg)
 	if err != nil {
 		internalError(w, r, err)
@@ -606,7 +607,6 @@ func (a *API) CopyTrips(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	p := auth.FromContext(ctx)
 	res := copyResult{Skipped: []copySkipped{}}
 	err = a.Store.InTx(ctx, func(q store.DBTX) error {
 		source, err := store.TripsOnDate(ctx, q, schoolID, req.FromDate, req.TripTypes)
@@ -637,18 +637,13 @@ func (a *API) CopyTrips(w http.ResponseWriter, r *http.Request) {
 					skip(firstFieldError(te.body.Fields))
 					continue
 				}
-				// Skip clashes without aborting the transaction.
-				var id string
-				err := q.QueryRow(ctx, `
-					INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id, notes, title, notify_parents, created_by)
-					VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING RETURNING id`,
-					schoolID, d, t.TripType, routeID, t.Bus.ID, t.Driver.ID, t.Notes, t.Title, t.NotifyParents, p.UserID).Scan(&id)
+				id, clash, err := insertTripIfFree(ctx, q, schoolID, tr.input(), "copied from "+req.FromDate)
 				if err != nil {
-					if errors.Is(err, pgx.ErrNoRows) { // ON CONFLICT DO NOTHING inserted nothing
-						skip("route, bus or driver already has a trip in this slot")
-						continue
-					}
 					return err
+				}
+				if clash != "" {
+					skip(clash)
+					continue
 				}
 				if t.TripType == models.TripSpecial {
 					srcWaypoints, err := store.ListWaypoints(ctx, q, t.ID)
@@ -664,12 +659,6 @@ func (a *API) CopyTrips(w http.ResponseWriter, r *http.Request) {
 						return err
 					}
 				}
-				if err := store.InsertTripHistory(ctx, q, store.TripHistoryEntry{
-					TripID: id, SchoolID: schoolID, To: models.TripScheduled, ByUserID: &p.UserID, ByRole: string(p.Role),
-					Reason: "copied from " + req.FromDate,
-				}); err != nil {
-					return err
-				}
 				res.Created++
 			}
 		}
@@ -683,6 +672,155 @@ func (a *API) CopyTrips(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, res)
+}
+
+// insertTripIfFree creates a scheduled trip (with its first history entry) unless its
+// route, bus or driver already has a trip in the slot. Then it returns what clashes
+// instead, without aborting the transaction (ON CONFLICT DO NOTHING).
+func insertTripIfFree(ctx context.Context, q store.DBTX, schoolID string, in store.TripInput, reason string) (id, clash string, err error) {
+	p := auth.FromContext(ctx)
+	err = q.QueryRow(ctx, `
+		INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id, notes, title, notify_parents, created_by)
+		VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING RETURNING id`,
+		schoolID, in.TripDate, in.TripType, in.RouteID, in.BusID, in.DriverID, in.Notes, in.Title, in.NotifyParents, p.UserID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) { // nothing inserted: name what is taken
+		clash, err = store.TripSlotClash(ctx, q, schoolID, in.TripDate, in.TripType, in.RouteID, in.BusID, in.DriverID)
+		if err == nil && clash == "" {
+			clash = "route, bus or driver already has a trip in this slot"
+		}
+		return "", clash, err
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return id, "", store.InsertTripHistory(ctx, q, store.TripHistoryEntry{
+		TripID: id, SchoolID: schoolID, To: models.TripScheduled, ByUserID: &p.UserID, ByRole: string(p.Role), Reason: reason,
+	})
+}
+
+// maxBulkDates bounds one bulk assignment: every day from today to maxDaysAhead.
+const maxBulkDates = maxDaysAhead + 1
+
+// BulkCreateTrips assigns one route + bus + driver to Morning Pickup and/or Evening
+// Drop on many dates at once (planning ahead). Route, bus and driver are checked once
+// (400 with field errors); then each date + trip type is created, or skipped and
+// listed when the date is out of range or the slot is already taken.
+func (a *API) BulkCreateTrips(w http.ResponseWriter, r *http.Request) {
+	schoolID := chi.URLParam(r, "schoolID")
+	var req struct {
+		Dates     []string `json:"dates"`
+		TripTypes []string `json:"trip_types"`
+		RouteID   string   `json:"route_id"`
+		BusID     string   `json:"bus_id"`
+		DriverID  string   `json:"driver_id"`
+		Notes     string   `json:"notes"`
+	}
+	if !httpx.Decode(w, r, &req) {
+		return
+	}
+	v := validate.New()
+	v.Check(len(req.Dates) >= 1 && len(req.Dates) <= maxBulkDates, "dates", fmt.Sprintf("give 1 to %d dates", maxBulkDates))
+	seen := map[string]bool{}
+	for _, d := range req.Dates {
+		_, err := time.Parse(time.DateOnly, d)
+		v.Check(err == nil, "dates", "every date must be YYYY-MM-DD")
+		v.Check(!seen[d], "dates", "a date is listed twice")
+		seen[d] = true
+	}
+	v.Check(len(req.TripTypes) >= 1 && len(req.TripTypes) <= 2, "trip_types", "choose Morning Pickup, Evening Drop or both")
+	for _, tt := range req.TripTypes {
+		v.OneOf("trip_types", tt, models.TripMorningPickup, models.TripEveningDrop)
+	}
+	v.Check(len(req.TripTypes) != 2 || req.TripTypes[0] != req.TripTypes[1], "trip_types", "a trip type is listed twice")
+	if !v.OK() {
+		httpx.ValidationError(w, v.Errors())
+		return
+	}
+	sort.Strings(req.Dates)
+
+	ctx := r.Context()
+	res := copyResult{Skipped: []copySkipped{}}
+	err := a.Store.InTx(ctx, func(q store.DBTX) error {
+		today, err := store.SchoolToday(ctx, q, schoolID)
+		if err != nil {
+			return err
+		}
+		// Route, bus and driver are the same on every date: check them once, as for today.
+		for _, tt := range req.TripTypes {
+			check := tripRequest{TripDate: today, TripType: tt, RouteID: req.RouteID, BusID: req.BusID,
+				DriverID: req.DriverID, Notes: req.Notes}
+			if err := validateTrip(ctx, q, schoolID, &check); err != nil {
+				return err
+			}
+			req.Notes = check.Notes
+		}
+		route, err := store.GetRoute(ctx, q, schoolID, req.RouteID)
+		if err != nil {
+			return err
+		}
+		for _, d := range req.Dates {
+			for _, tt := range req.TripTypes {
+				skip := func(reason string) {
+					res.Skipped = append(res.Skipped, copySkipped{TripDate: d, TripType: tt, RouteCode: route.Code, Reason: reason})
+				}
+				dv := validate.New()
+				validateTripDate(dv, "trip_date", d, today)
+				if !dv.OK() {
+					skip("date " + dv.Errors()["trip_date"])
+					continue
+				}
+				tr := tripRequest{TripDate: d, TripType: tt, RouteID: req.RouteID, BusID: req.BusID, DriverID: req.DriverID, Notes: req.Notes}
+				_, clash, err := insertTripIfFree(ctx, q, schoolID, tr.input(), "bulk assignment")
+				if err != nil {
+					return err
+				}
+				if clash != "" {
+					skip(clash)
+					continue
+				}
+				res.Created++
+			}
+		}
+		return a.audit(ctx, q, r, store.AuditEntry{
+			SchoolID: &schoolID, Action: "trip.bulk_create", EntityType: "trip",
+			After: map[string]any{"route_id": req.RouteID, "bus_id": req.BusID, "driver_id": req.DriverID,
+				"trip_types": req.TripTypes, "dates": req.Dates, "created": res.Created, "skipped": len(res.Skipped)},
+		})
+	})
+	if err != nil {
+		writeTripError(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, res)
+}
+
+// maxCalendarDays bounds one calendar request (a month view shows up to 42 days).
+const maxCalendarDays = 62
+
+// TripCalendar counts trips per date and trip type between from and to (inclusive),
+// for the Trip Planner month view.
+func (a *API) TripCalendar(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+	from, to := qs.Get("from"), qs.Get("to")
+	v := validate.New()
+	f, errF := time.Parse(time.DateOnly, from)
+	t, errT := time.Parse(time.DateOnly, to)
+	v.Check(errF == nil, "from", "must be a date YYYY-MM-DD")
+	v.Check(errT == nil, "to", "must be a date YYYY-MM-DD")
+	if errF == nil && errT == nil {
+		v.Check(!t.Before(f), "to", "must not be before from")
+		v.Check(t.Sub(f) < maxCalendarDays*24*time.Hour, "to", fmt.Sprintf("at most %d days per request", maxCalendarDays))
+	}
+	if !v.OK() {
+		httpx.ValidationError(w, v.Errors())
+		return
+	}
+	days, err := store.TripCalendar(r.Context(), a.Store.Pool, chi.URLParam(r, "schoolID"), from, to)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, days)
 }
 
 func firstFieldError(fields map[string]string) string {

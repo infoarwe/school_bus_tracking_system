@@ -228,6 +228,79 @@ func TestTripOverrideAndCopy(t *testing.T) {
 	e.expect(e.do("POST", trips+"/copy", f.tm, map[string]any{"from_date": f.today, "to_dates": []string{f.today}}), 400, "validation_failed")
 }
 
+func TestBulkTripsAndCalendar(t *testing.T) {
+	e := newEnv(t)
+	f := newTripFixture(e)
+	trips := f.base + "/trips"
+	yesterday, far := e.dateIn(f.school, -1), e.dateIn(f.school, 91)
+
+	// Tomorrow's Morning Pickup slot already uses driver1.
+	e.expect(e.do("POST", trips, f.tm, f.trip(f.tomorrow, "morning_pickup", f.pickupOnlyRoute, f.bus2, f.driver1)), 201, "")
+	bulk := map[string]any{"dates": []string{f.today, f.tomorrow, f.dayFrom, yesterday, far},
+		"trip_types": []string{"morning_pickup", "evening_drop"}, "route_id": f.route, "bus_id": f.bus1, "driver_id": f.driver1}
+	r := e.do("POST", trips+"/bulk", f.tm, bulk)
+	e.expect(r, 200, "")
+	// 5 dates × 2 types = 10: yesterday and day 91 (×2) and tomorrow's morning are skipped.
+	if r.data()["created"] != float64(5) || len(r.data()["skipped"].([]any)) != 5 {
+		t.Fatalf("bulk = %v", r.data())
+	}
+	var driverClash bool
+	for _, s := range r.data()["skipped"].([]any) {
+		sk := s.(map[string]any)
+		if sk["trip_date"] == f.tomorrow && sk["trip_type"] == "morning_pickup" {
+			driverClash = sk["reason"] == "driver is already on another trip" && sk["route_code"] == "RS-01"
+		}
+	}
+	if !driverClash {
+		t.Errorf("tomorrow's skip should name the driver: %v", r.data()["skipped"])
+	}
+	// Running it again creates nothing.
+	if again := e.do("POST", trips+"/bulk", f.tm, bulk); again.data()["created"] != float64(0) {
+		t.Errorf("bulk twice must not duplicate: %v", again.data())
+	}
+	// Route, bus and driver are checked once: an unusable one is a 400, not 10 skips.
+	bad := map[string]any{"dates": []string{f.tomorrow}, "trip_types": []string{"evening_drop"},
+		"route_id": f.pickupOnlyRoute, "bus_id": f.busMaint, "driver_id": f.driver2}
+	r = e.do("POST", trips+"/bulk", f.tm, bad)
+	e.expect(r, 400, "validation_failed")
+	if fl := r.Body["error"].(map[string]any)["fields"].(map[string]any); fl["route_id"] == nil || fl["bus_id"] == nil {
+		t.Errorf("fields = %v", fl)
+	}
+	for _, body := range []map[string]any{
+		{"dates": []string{}, "trip_types": []string{"morning_pickup"}, "route_id": f.route, "bus_id": f.bus2, "driver_id": f.driver2},
+		{"dates": []string{f.tomorrow}, "trip_types": []string{"special_trip"}, "route_id": f.route, "bus_id": f.bus2, "driver_id": f.driver2},
+		{"dates": []string{f.tomorrow, f.tomorrow}, "trip_types": []string{"evening_drop"}, "route_id": f.route, "bus_id": f.bus2, "driver_id": f.driver2},
+	} {
+		e.expect(e.do("POST", trips+"/bulk", f.tm, body), 400, "validation_failed")
+	}
+	var n int
+	_ = e.pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_logs WHERE action = 'trip.bulk_create'`).Scan(&n)
+	if n != 2 {
+		t.Errorf("bulk audit entries = %d, want 2", n)
+	}
+
+	// Calendar: counts per date and trip type.
+	cal := e.do("GET", trips+"/calendar?from="+f.today+"&to="+f.dayFrom, f.tm, nil)
+	e.expect(cal, 200, "")
+	got := map[string]float64{}
+	for _, d := range cal.Body["data"].([]any) {
+		m := d.(map[string]any)
+		got[m["trip_date"].(string)+" "+m["trip_type"].(string)] = m["assigned"].(float64)
+	}
+	if got[f.tomorrow+" morning_pickup"] != 1 || got[f.tomorrow+" evening_drop"] != 1 || got[f.today+" morning_pickup"] != 1 || len(got) != 6 {
+		t.Errorf("calendar = %v", got)
+	}
+	e.expect(e.do("GET", trips+"/calendar?from="+f.dayFrom+"&to="+f.today, f.tm, nil), 400, "validation_failed")
+	e.expect(e.do("GET", trips+"/calendar?from="+f.today+"&to="+far, f.tm, nil), 400, "validation_failed")
+
+	// Upcoming list, earliest first.
+	up := e.do("GET", trips+"?from="+f.today+"&sort=asc", f.tm, nil).list()
+	date := func(i int) any { return up[i].(map[string]any)["trip_date"] }
+	if len(up) != 6 || date(0) != f.today || date(5) != f.dayFrom {
+		t.Errorf("upcoming = %v", up)
+	}
+}
+
 func TestParentSeesChildTrips(t *testing.T) {
 	e := newEnv(t)
 	f := newTripFixture(e)

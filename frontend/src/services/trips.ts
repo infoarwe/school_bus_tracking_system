@@ -1,9 +1,11 @@
 import { api, getData, getPage, send } from './api'
 import type {
+  BulkTripsInput,
   CopyTripsResult,
   PlannedPath,
   RouteSnapshot,
   Trip,
+  TripCalendarDay,
   TripDetail,
   TripInput,
   TripListParams,
@@ -44,4 +46,9 @@ export const tripsApi = {
     schoolId: string,
     body: { from_date: string; to_dates: string[]; trip_types?: TripType[] },
   ) => send<CopyTripsResult>('post', `${base(schoolId)}/copy`, body),
+  /** Same result shape as copy: created count + skipped dates with reasons. */
+  bulk: (schoolId: string, body: BulkTripsInput) =>
+    send<CopyTripsResult>('post', `${base(schoolId)}/bulk`, body),
+  calendar: (schoolId: string, from: string, to: string) =>
+    getData<TripCalendarDay[]>(`${base(schoolId)}/calendar`, { from, to }),
 }
