@@ -77,6 +77,7 @@ type FCMSender struct {
 	projectID string
 	client    *http.Client
 	endpoint  string
+	iidBase   string // topic-management API; empty = iidBaseURL (tests point it at a fake)
 }
 
 // NewFCMSender reads a Firebase service-account JSON file (server-wide fallback key).
@@ -164,88 +165,111 @@ func (s *FCMSender) Send(ctx context.Context, p Push) error {
 	return fmt.Errorf("fcm: %s: %s", res.Status, strings.TrimSpace(string(msg)))
 }
 
-// topicSubscriptionCall manages one token's subscription to one topic via the
-// current FCM v1 topic-subscription REST API (POST .../topicSubscriptions to
-// subscribe, DELETE .../topicSubscriptions/{topic} to unsubscribe) — the
-// per-registration successor to the legacy Instance ID batchAdd/batchRemove
-// API (iid.googleapis.com), which Google's front end now rejects outright
-// with a generic 401 "Unauthorized" HTML page for every request, regardless
-// of credential validity (confirmed by a live diagnostic call; see the audit
-// this fix came from). There is no batch form in the new API — every real
-// caller in this codebase already only ever passes one token at a time (see
-// SubscribeTokens/UnsubscribeTokens below), so looping per-token here changes
-// nothing about the calling code's shape.
-func (s *FCMSender) topicSubscriptionCall(ctx context.Context, method, token, topic string) error {
-	url := "https://fcm.googleapis.com/v1/projects/" + s.projectID + "/registrations/" + token + "/topicSubscriptions"
-	if method == http.MethodPost {
-		url += "?topic_name=" + topic
-	} else {
-		url += "/" + topic
-	}
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := s.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("fcm topic subscription: %w", err)
-	}
-	defer res.Body.Close()
-	// Subscribing when already subscribed reports 409 - the desired state
-	// (subscribed) already holds, so this counts as success, not a failure.
-	if res.StatusCode == http.StatusOK || (method == http.MethodPost && res.StatusCode == http.StatusConflict) {
-		return nil
-	}
-	// Read generously (Firebase error bodies are small JSON, well under this)
-	// before truncating, so every occurrence of token below is caught whole —
-	// truncating first could cut a repeated occurrence mid-token and leave a
-	// readable fragment behind.
-	msg, _ := io.ReadAll(io.LimitReader(res.Body, 8192))
-	if res.StatusCode == http.StatusNotFound {
-		return ErrInvalidToken
-	}
-	// Firebase's error body echoes the request resource path, which contains
-	// token verbatim (sometimes more than once, e.g. in both "message" and
-	// "metadata") — strip every occurrence so a reconcile-failure log line
-	// (ReconcileToken -> notifications.go's slog.Warn) never carries the
-	// device's FCM token.
-	sanitized := strings.ReplaceAll(strings.TrimSpace(string(msg)), token, "<redacted>")
-	if len(sanitized) > 1024 {
-		sanitized = sanitized[:1024]
-	}
-	return fmt.Errorf("fcm topic subscription: %s: %s", res.Status, sanitized)
-}
+// iidBaseURL is Firebase's topic-management API (Instance ID batchAdd /
+// batchRemove). With a service-account OAuth token it needs the header
+// "access_token_auth: true"; without it Google answers 401 to every request.
+// The per-registration FCM v1 endpoint (.../registrations/{token}/topicSubscriptions)
+// is not usable here: it answers 403 'cloudmessaging.topicSubscriptions.create'
+// denied even for a Firebase Admin SDK key with full rights (checked against
+// project arwe-school on 2026-10-17, where batchAdd answered 200 for the same token).
+const iidBaseURL = "https://iid.googleapis.com/iid/v1"
 
-// topicSubscriptionBatch calls topicSubscriptionCall for each token, in the
-// shape ReconcileToken expects: tokens the API reports as gone go in failed
-// (the caller must not record those as subscribed/unsubscribed); the first
-// other error aborts the loop and is returned as err, leaving any
-// not-yet-attempted tokens untouched for the next reconciliation to retry.
-func (s *FCMSender) topicSubscriptionBatch(ctx context.Context, method string, tokens []string, topic string) (failed []string, err error) {
-	for _, token := range tokens {
-		callErr := s.topicSubscriptionCall(ctx, method, token, topic)
-		switch {
-		case callErr == nil:
-		case errors.Is(callErr, ErrInvalidToken):
-			failed = append(failed, token)
-		default:
-			return failed, callErr
+// iidMaxTokens is Firebase's per-request limit for batchAdd/batchRemove.
+const iidMaxTokens = 1000
+
+// topicSubscriptionBatch subscribes (batchAdd) or unsubscribes (batchRemove)
+// tokens, in the shape ReconcileToken expects: tokens Firebase reports as gone
+// (NOT_FOUND, INVALID_ARGUMENT) go in failed (the caller must not record those
+// as subscribed/unsubscribed); any other error aborts and is returned as err,
+// leaving not-yet-confirmed tokens for the next reconciliation to retry.
+func (s *FCMSender) topicSubscriptionBatch(ctx context.Context, action string, tokens []string, topic string) (failed []string, err error) {
+	base := s.iidBase
+	if base == "" {
+		base = iidBaseURL
+	}
+	for start := 0; start < len(tokens); start += iidMaxTokens {
+		chunk := tokens[start:min(start+iidMaxTokens, len(tokens))]
+		gone, err := s.iidCall(ctx, base+":"+action, chunk, topic)
+		failed = append(failed, gone...)
+		if err != nil {
+			return failed, err
 		}
 	}
 	return failed, nil
+}
+
+// iidCall sends one batchAdd/batchRemove request. Firebase answers 200 with one
+// result per token, in order: {} on success, {"error": "NOT_FOUND"} etc. otherwise.
+func (s *FCMSender) iidCall(ctx context.Context, url string, tokens []string, topic string) (gone []string, err error) {
+	body, err := json.Marshal(map[string]any{"to": "/topics/" + topic, "registration_tokens": tokens})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("access_token_auth", "true")
+	res, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fcm topic subscription: %w", err)
+	}
+	defer res.Body.Close()
+	// Read generously before truncating so every token in the body is redacted whole.
+	msg, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fcm topic subscription: %s: %s", res.Status, redactTokens(string(msg), tokens))
+	}
+	var out struct {
+		Results []struct {
+			Error string `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(msg, &out); err != nil || len(out.Results) != len(tokens) {
+		return nil, fmt.Errorf("fcm topic subscription: unexpected response: %s", redactTokens(string(msg), tokens))
+	}
+	var other string
+	for i, r := range out.Results {
+		switch r.Error {
+		case "":
+		case "NOT_FOUND", "INVALID_ARGUMENT":
+			gone = append(gone, tokens[i])
+		default:
+			if other == "" {
+				other = r.Error
+			}
+		}
+	}
+	if other != "" {
+		return gone, fmt.Errorf("fcm topic subscription: %s", other)
+	}
+	return gone, nil
+}
+
+// redactTokens strips device tokens from a Firebase reply so log lines
+// (ReconcileToken -> notifications.go's slog.Warn) never carry them.
+func redactTokens(msg string, tokens []string) string {
+	msg = strings.TrimSpace(msg)
+	for _, t := range tokens {
+		msg = strings.ReplaceAll(msg, t, "<redacted>")
+	}
+	if len(msg) > 1024 {
+		msg = msg[:1024]
+	}
+	return msg
 }
 
 // SubscribeTokens subscribes the given device tokens to topic. The returned
 // slice lists tokens Firebase reported as failed — the caller must not record
 // those as subscribed.
 func (s *FCMSender) SubscribeTokens(ctx context.Context, tokens []string, topic string) (failed []string, err error) {
-	return s.topicSubscriptionBatch(ctx, http.MethodPost, tokens, topic)
+	return s.topicSubscriptionBatch(ctx, "batchAdd", tokens, topic)
 }
 
 // UnsubscribeTokens unsubscribes the given device tokens from topic. The
 // returned slice lists tokens Firebase reported as failed — the caller must
 // keep tracking those as still subscribed so a later reconciliation retries.
 func (s *FCMSender) UnsubscribeTokens(ctx context.Context, tokens []string, topic string) (failed []string, err error) {
-	return s.topicSubscriptionBatch(ctx, http.MethodDelete, tokens, topic)
+	return s.topicSubscriptionBatch(ctx, "batchRemove", tokens, topic)
 }
