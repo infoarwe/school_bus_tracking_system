@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.18.0
+  version: 0.19.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -170,6 +170,8 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.19.0: `POST /schools/{id}/clear-data` (Super Admin, admin web): clear a school's test data by part, with
+      a dry-run preview and the school code as confirmation. Removed drivers' and parents' logins stop working.
     - 0.18.0: Trip Planner (admin web, additive): `POST /schools/{id}/trips/bulk` (one route + bus + driver on many
       dates), `GET /schools/{id}/trips/calendar` (counts per date and trip type), and `sort=asc` on `GET /trips`.
     - 0.17.0: **Push delivery is now topic-based, server-subscribed only** (reverses 0.12.2's documented
@@ -739,6 +741,62 @@ paths:
                 type: object
                 properties:
                   data: { $ref: "#/components/schemas/School" }
+
+  /api/v1/schools/{schoolID}/clear-data:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    post:
+      tags: [Schools]
+      summary: Clear a school's data (Super Admin)
+      description: |
+        Removes test/operational data of one school. Choose the parts in `scopes`: `trips` (with status history,
+        GPS points, stop events, delays, emergencies, route images), `notifications` (with inbox, push queue and
+        announcements), `students` (with parents, their logins and devices, and route assignments), `routes` (with
+        stops and student/driver route assignments; needs `trips` and `notifications`), `buses` and `drivers` (with
+        their logins; each needs `trips`). The school, its settings, branding, School Admins, Transport Managers and
+        the audit log are kept; audit entries made by removed drivers/parents keep their role but lose the user link.
+
+        `dry_run: true` returns the counts without deleting. Otherwise `confirm_code` must be the school code
+        (critical action, audited as `school.clear_data`). `409 trips_in_progress` while a trip is running.
+      operationId: clearSchoolData
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scopes]
+              properties:
+                scopes:
+                  type: array
+                  minItems: 1
+                  items: { type: string, enum: [trips, notifications, students, routes, buses, drivers] }
+                dry_run: { type: boolean, default: false }
+                confirm_code: { type: string, description: "The school's code; required unless dry_run." }
+            example: { scopes: [trips, notifications, students, routes, buses, drivers], confirm_code: DEMO }
+      responses:
+        "200":
+          description: Rows deleted (or that would be, on a dry run) per kind.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      dry_run: { type: boolean }
+                      scopes: { type: array, items: { type: string } }
+                      deleted: { type: object, additionalProperties: { type: integer } }
+              example:
+                data:
+                  dry_run: false
+                  scopes: [buses, drivers, notifications, routes, students, trips]
+                  deleted: { trips: 42, gps_points: 3810, routes: 3, stops: 18, students: 25, parents: 21, logins: 23, buses: 2, drivers: 2, notifications: 160, announcements: 4 }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/schools/{schoolID}/users:
     parameters:

@@ -13,7 +13,7 @@ Go 1.26+ (see `backend/go.mod`), Node 22+, Docker Desktop (on Windows it uses WS
 
 Deploying to a server (shared dev, staging, production): see [deploy/README.md](deploy/README.md).
 
-### Deploy (shared dev server, https://school.ridelogic.in)
+### Deploy (shared dev server, https://ics.ridelogic.in)
 
 The box (`ssh root@103.235.106.21 -p 2024`) also runs the Blue Taxi production sites and has only 1.7 GB RAM, so
 images are **built on your machine** and copied over; never `docker compose build` on the server, and never touch
@@ -34,7 +34,7 @@ git pull          # must say "Updating …" or "Already up to date"; on an error
 cd deploy && C="docker compose -f docker-compose.yml -f docker-compose.proxied.yml"
 $C up -d --no-build --wait
 $C ps             # api/nginx CREATED must be "seconds ago"; migrate Exited (0)
-curl -s https://school.ridelogic.in/health
+curl -s https://ics.ridelogic.in/health
 ```
 
 The host Nginx terminates HTTPS and forwards to the stack on `127.0.0.1:8180`; Postgres is on `127.0.0.1:5434`

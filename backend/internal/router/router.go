@@ -161,6 +161,7 @@ func New(d Deps) http.Handler {
 					r.With(webRoles).Get("/", a.GetSchool)
 					r.With(superAdmin).Put("/", a.UpdateSchool)
 					r.With(superAdmin).Patch("/status", a.SetSchoolStatus)
+					r.With(superAdmin).Post("/clear-data", a.ClearSchoolData)
 					r.With(webRoles).Get("/settings/maps", a.GetMapsSettings)
 					r.With(userAdmins).Put("/settings/maps", a.UpdateMapsSettings)
 					r.With(userAdmins).Get("/settings/push", a.GetPushSettings)

@@ -16,6 +16,7 @@ import {
   Typography,
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
+import ClearSchoolDataModal from '../components/ClearSchoolDataModal'
 import ListToolbar from '../components/ListToolbar'
 import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
@@ -56,6 +57,7 @@ export default function SchoolsPage() {
   }, [reloadList, reloadSchools])
 
   const [deactivating, setDeactivating] = useState<School | null>(null)
+  const [clearing, setClearing] = useState<School | null>(null)
 
   async function toggleStatus(s: School, confirmCode?: string) {
     try {
@@ -69,6 +71,7 @@ export default function SchoolsPage() {
 
   return (
     <Flex vertical gap="middle">
+      {clearing && <ClearSchoolDataModal school={clearing} onClose={() => setClearing(null)} />}
       {deactivating && (
         <ConfirmDeactivate
           school={deactivating}
@@ -114,7 +117,7 @@ export default function SchoolsPage() {
           },
           {
             title: 'Actions',
-            width: 260,
+            width: 360,
             render: (_, s) => (
               <Space size="small">
                 <Button size="small" onClick={() => setEditing(s)}>
@@ -128,6 +131,9 @@ export default function SchoolsPage() {
                   }}
                 >
                   Users
+                </Button>
+                <Button size="small" danger onClick={() => setClearing(s)}>
+                  Clear data
                 </Button>
                 {s.status === 'active' ? (
                   <Button size="small" danger onClick={() => setDeactivating(s)}>

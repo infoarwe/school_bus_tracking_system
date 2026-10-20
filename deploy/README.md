@@ -133,7 +133,7 @@ S2-13 is done when they call `GET /health` from a phone over mobile data and get
 
 ## Shared server (host Nginx already on 80/443)
 
-When the server already runs other sites with its own Nginx (our shared dev server, school.ridelogic.in), the
+When the server already runs other sites with its own Nginx (our shared dev server, ics.ridelogic.in), the
 stack must not take ports 80/443. Use the override `docker-compose.proxied.yml`: the web container listens on
 `127.0.0.1:8180` over HTTP (`deploy/nginx/templates-proxied/`), the host Nginx terminates HTTPS and forwards to
 it, and Postgres is published on `127.0.0.1:5434` for SSH-tunnel access. Nothing new is public.
@@ -144,9 +144,9 @@ C="docker compose -f docker-compose.yml -f docker-compose.proxied.yml"
 $C up -d --no-build --wait
 
 # Host Nginx site (once). Test before reloading so the other sites are never affected.
-cp host-nginx/sbts.conf /etc/nginx/conf.d/school.ridelogic.in.conf   # edit server_name for another host
+cp host-nginx/sbts.conf /etc/nginx/conf.d/ics.ridelogic.in.conf   # edit server_name for another host
 nginx -t && systemctl reload nginx
-certbot --nginx -d school.ridelogic.in --non-interactive --redirect
+certbot --nginx -d ics.ridelogic.in --non-interactive --redirect
 ```
 
 **Small servers (under 4 GB RAM): do not build on the server.** `npm ci` and the Go build can exhaust memory
