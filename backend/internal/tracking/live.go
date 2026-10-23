@@ -33,11 +33,15 @@ func eventsKey(schoolID string) string { return "school:" + schoolID + ":events"
 // BusLocation is the current position of the bus on a trip, with enough trip
 // details for a live map without another lookup.
 type BusLocation struct {
-	TripID     string    `json:"trip_id"`
-	SchoolID   string    `json:"school_id"`
-	TripType   string    `json:"trip_type"`
-	RouteID    string    `json:"route_id"`
-	RouteCode  string    `json:"route_code"`
+	TripID    string `json:"trip_id"`
+	SchoolID  string `json:"school_id"`
+	TripType  string `json:"trip_type"`
+	RouteID   string `json:"route_id"`
+	RouteCode string `json:"route_code"`
+	// TripTitle: the outing's own name, set only for a routeless Special
+	// Trip/Outing (RouteCode is "" then) — the admin web's fallback label
+	// when there is no route code to show.
+	TripTitle  string    `json:"trip_title"`
 	BusNumber  string    `json:"bus_number"`
 	DriverName string    `json:"driver_name"`
 	Latitude   float64   `json:"latitude"`

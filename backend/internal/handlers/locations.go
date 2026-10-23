@@ -98,7 +98,7 @@ func (a *API) DriverPostLocations(w http.ResponseWriter, r *http.Request) {
 	newest := kept[len(kept)-1]
 	if err := a.Live.Update(ctx, tracking.BusLocation{
 		TripID: t.ID, SchoolID: t.SchoolID, TripType: t.TripType, RouteID: routeID, RouteCode: routeCode,
-		BusNumber: t.Bus.VehicleNumber, DriverName: t.Driver.Name,
+		TripTitle: t.Title, BusNumber: t.Bus.VehicleNumber, DriverName: t.Driver.Name,
 		Latitude: newest.Latitude, Longitude: newest.Longitude, AccuracyM: newest.AccuracyM,
 		SpeedMPS: newest.SpeedMPS, Heading: newest.Heading, RecordedAt: newest.RecordedAt, ReceivedAt: time.Now().UTC(),
 	}); err != nil {

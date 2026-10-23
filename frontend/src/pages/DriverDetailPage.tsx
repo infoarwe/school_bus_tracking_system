@@ -345,7 +345,7 @@ function DriverDetail({ schoolId }: { schoolId: string }) {
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {t.running ? 'Driving now' : 'Bus today'}
               </Typography.Text>
-              {t.current ? (
+              {t.current?.bus ? (
                 <>
                   <Link to={`/buses/${t.current.bus.id}`}>
                     <Typography.Text strong style={{ fontSize: 16, color: 'inherit' }}>
@@ -359,7 +359,7 @@ function DriverDetail({ schoolId }: { schoolId: string }) {
                 </>
               ) : (
                 <Typography.Text type="secondary">
-                  {t.loading ? '…' : 'No trip today'}
+                  {t.loading ? '…' : t.current ? 'No bus assigned' : 'No trip today'}
                 </Typography.Text>
               )}
             </Flex>

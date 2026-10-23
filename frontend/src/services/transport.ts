@@ -9,6 +9,7 @@ import type {
   DriverStatus,
   ListParams,
   RouteInput,
+  RouteSchedule,
   Stop,
   StopInput,
 } from './types'
@@ -50,6 +51,10 @@ export const routesApi = {
     send<BusRoute>('put', route(schoolId, id), input),
   setStatus: (schoolId: string, id: string, status: BusRoute['status']) =>
     send<BusRoute>('patch', `${route(schoolId, id)}/status`, { status }),
+  /** What Morning Pickup/Evening Drop actually run as for this route, derived live
+   * from its stops' own pickup_time/drop_time — never invented. */
+  schedule: (schoolId: string, routeId: string) =>
+    getData<RouteSchedule>(`${route(schoolId, routeId)}/schedule`),
 
   createStop: (schoolId: string, routeId: string, input: StopInput & { position?: number }) =>
     send<Stop>('post', `${route(schoolId, routeId)}/stops`, input),

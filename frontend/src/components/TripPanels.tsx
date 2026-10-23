@@ -165,15 +165,18 @@ export function TripTable({
         },
         { title: 'Route', render: (_, t) => <RouteBadge trip={t} /> },
         show === 'bus'
-          ? { title: 'Bus', width: 130, render: (_, t: Trip) => t.bus.vehicle_number }
+          ? { title: 'Bus', width: 130, render: (_, t: Trip) => t.bus?.vehicle_number ?? <Tag>Unassigned</Tag> }
           : {
               title: 'Driver',
               width: 170,
-              render: (_, t: Trip) => (
-                <Link to={`/drivers/${t.driver.id}`} onClick={(e) => e.stopPropagation()}>
-                  {t.driver.name}
-                </Link>
-              ),
+              render: (_, t: Trip) =>
+                t.driver ? (
+                  <Link to={`/drivers/${t.driver.id}`} onClick={(e) => e.stopPropagation()}>
+                    {t.driver.name}
+                  </Link>
+                ) : (
+                  <Tag>Unassigned</Tag>
+                ),
             },
         ...(show === 'driver' && !compact
           ? [
@@ -181,7 +184,8 @@ export function TripTable({
                 title: 'Students',
                 width: 90,
                 align: 'right' as const,
-                render: (_: unknown, t: Trip) => `${t.student_count} / ${t.bus.capacity}`,
+                render: (_: unknown, t: Trip) =>
+                  t.bus ? `${t.student_count} / ${t.bus.capacity}` : `${t.student_count} / —`,
               },
             ]
           : []),
@@ -285,11 +289,11 @@ export function TodaySchedule({
                   </Space>
                   {show === 'bus' ? (
                     <Space size={4}>
-                      <CarOutlined /> {t.bus.vehicle_number}
+                      <CarOutlined /> {t.bus?.vehicle_number ?? 'Unassigned'}
                     </Space>
                   ) : (
                     <Space size={4}>
-                      <UserOutlined /> {t.driver.name}
+                      <UserOutlined /> {t.driver?.name ?? 'Unassigned'}
                     </Space>
                   )}
                 </Flex>
@@ -381,8 +385,8 @@ export function TripGroups({
         by === 'route'
           ? (t.route?.id ?? `outing:${t.title}`)
           : by === 'bus'
-            ? t.bus.id
-            : t.driver.id,
+            ? (t.bus?.id ?? 'unassigned')
+            : (t.driver?.id ?? 'unassigned'),
       ),
     [trips, by],
   )
@@ -401,13 +405,19 @@ export function TripGroups({
         </Space>
       )
     ) : by === 'bus' ? (
-      <Link to={`/buses/${t.bus.id}`}>
-        <CarOutlined /> {t.bus.vehicle_number}
-      </Link>
-    ) : (
+      t.bus ? (
+        <Link to={`/buses/${t.bus.id}`}>
+          <CarOutlined /> {t.bus.vehicle_number}
+        </Link>
+      ) : (
+        <Tag>Unassigned</Tag>
+      )
+    ) : t.driver ? (
       <Link to={`/drivers/${t.driver.id}`}>
         <UserOutlined /> {t.driver.name}
       </Link>
+    ) : (
+      <Tag>Unassigned</Tag>
     )
   return (
     <Table<GroupRow>

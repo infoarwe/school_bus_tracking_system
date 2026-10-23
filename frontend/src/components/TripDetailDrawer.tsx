@@ -268,7 +268,7 @@ export default function TripDetailDrawer({
             tone="purple"
             icon={<TeamOutlined />}
             title="Students / seats"
-            value={`${trip.student_count} / ${trip.bus.capacity}`}
+            value={trip.bus ? `${trip.student_count} / ${trip.bus.capacity}` : `${trip.student_count} / —`}
           />
         </div>
 
@@ -284,7 +284,7 @@ export default function TripDetailDrawer({
                   <CarOutlined /> Bus
                 </>
               ),
-              children: `${trip.bus.vehicle_number} · ${trip.bus.capacity} seats`,
+              children: trip.bus ? `${trip.bus.vehicle_number} · ${trip.bus.capacity} seats` : 'Unassigned',
             },
             {
               key: 'driver',
@@ -293,13 +293,15 @@ export default function TripDetailDrawer({
                   <UserOutlined /> Driver
                 </>
               ),
-              children: (
+              children: trip.driver ? (
                 <Flex vertical>
                   <span>{trip.driver.name}</span>
                   <Typography.Link href={`tel:${trip.driver.mobile}`} style={{ fontSize: 12 }}>
                     <PhoneOutlined /> {trip.driver.mobile}
                   </Typography.Link>
                 </Flex>
+              ) : (
+                'Unassigned'
               ),
             },
             {

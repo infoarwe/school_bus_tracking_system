@@ -26,6 +26,7 @@ import {
   UnorderedListOutlined,
 } from '@ant-design/icons'
 import BulkAssignModal from '../components/BulkAssignModal'
+import BulkUnassignFilterModal from '../components/BulkUnassignFilterModal'
 import ListEmpty from '../components/ListEmpty'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
@@ -68,6 +69,7 @@ function Planner({ schoolId }: { schoolId: string }) {
   const [view, setView] = useState<View>('calendar')
   const [masters, setMasters] = useState<Masters>({ routes: [], buses: [], drivers: [] })
   const [bulk, setBulk] = useState<{ from?: string } | null>(null)
+  const [bulkUnassignOpen, setBulkUnassignOpen] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
@@ -86,9 +88,14 @@ function Planner({ schoolId }: { schoolId: string }) {
         title="Trip Planner"
         subtitle="See which days already have trips and assign upcoming days in bulk (up to 90 days ahead)."
         extra={
-          <Button type="primary" icon={<AppstoreAddOutlined />} onClick={() => setBulk({})}>
-            Bulk assign
-          </Button>
+          <Space>
+            <Button danger onClick={() => setBulkUnassignOpen(true)}>
+              Bulk unassign
+            </Button>
+            <Button type="primary" icon={<AppstoreAddOutlined />} onClick={() => setBulk({})}>
+              Bulk assign
+            </Button>
+          </Space>
         }
       />
       <Segmented<View>
@@ -124,6 +131,19 @@ function Planner({ schoolId }: { schoolId: string }) {
           onClose={() => setBulk(null)}
           onDone={() => {
             setBulk(null)
+            setReloadKey((k) => k + 1)
+          }}
+        />
+      )}
+      {bulkUnassignOpen && (
+        <BulkUnassignFilterModal
+          schoolId={schoolId}
+          routes={masters.routes}
+          buses={masters.buses}
+          drivers={masters.drivers}
+          onClose={() => setBulkUnassignOpen(false)}
+          onDone={() => {
+            setBulkUnassignOpen(false)
             setReloadKey((k) => k + 1)
           }}
         />
@@ -470,8 +490,8 @@ function UpcomingTrips({
                 t.title
               ),
           },
-          { title: 'Bus', render: (_, t) => t.bus.vehicle_number },
-          { title: 'Driver', render: (_, t) => t.driver.name },
+          { title: 'Bus', render: (_, t) => t.bus?.vehicle_number ?? <Tag>Unassigned</Tag> },
+          { title: 'Driver', render: (_, t) => t.driver?.name ?? <Tag>Unassigned</Tag> },
           {
             title: 'Assigned by',
             dataIndex: 'assigned_by',

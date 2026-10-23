@@ -129,15 +129,31 @@ func currentAssignmentsForDriver(ctx context.Context, q DBTX, driverID string) (
 }
 
 // EnsureDriverDailyTrips materializes a trips row for each of the driver's current
-// permanent assignments on date, if one doesn't already exist. Mirrors CopyTrips' exact
-// idiom (handlers/trips.go): INSERT ... ON CONFLICT DO NOTHING, so the trips table's own
-// unique indexes (trips_route_slot_key/trips_bus_slot_key/trips_driver_slot_key) are the
-// only guard needed - a trip in ANY status (scheduled, started, completed, or even
-// cancelled-and-replaced) already occupying that route/bus/driver + date + type slot is
-// left completely untouched; nothing is ever updated here, only inserted when missing.
-// created_by is left NULL (not the calling driver's own user id), so the resulting trip's
-// assigned_by computes as "staff", not "driver" - a driver cannot self-release a
-// permanently assigned trip the way they can a self-claimed one (route_slots.go).
+// permanent assignments on date, if one doesn't already exist. A permanent
+// assignment carries no time-of-day (it applies every day, at whatever time that
+// route always runs), so the trips it materializes have no scheduled_start_at/
+// end_at either, and so get no overlap protection from
+// trips_{route,bus,driver}_no_overlap (those only compare trips that both have a
+// scheduled window); the restored trips_{route,bus,driver}_slot_key indexes
+// would catch a collision with another schedule-less trip, but not with an
+// already-scheduled one (a partial index can't see rows outside its own WHERE
+// clause). This function is therefore its own guard against the route or bus
+// already having ANY (non-cancelled, any status, scheduled or not) trip that
+// date and type: an explicit NOT EXISTS, not ON CONFLICT DO NOTHING.
+//
+// Deliberately NOT guarded on driver_id: a driver can validly have more than
+// one trip of the same type on the same date (Multiple Daily Trips — e.g. two
+// permanent assignments for different trip types, or one permanent assignment
+// alongside a separately scheduled trip on another route). Guarding on the
+// driver here used to silently skip materializing this assignment's own trip
+// whenever the driver already had ANY other trip that date+type — hiding a
+// real assignment from the Driver app, not preventing a genuine conflict (the
+// route/bus checks above already cover the only conflicts this layer can
+// actually detect without a time window). The one real driver-level
+// conflict a schedule-less trip can still hit — trips_driver_slot_key, if the
+// driver already has a DIFFERENT schedule-less trip this date+type — is
+// caught below as a ConflictError and skipped the same as any other taken
+// slot, never surfaced as a request failure.
 func EnsureDriverDailyTrips(ctx context.Context, q DBTX, schoolID, driverID, date string) error {
 	assignments, err := currentAssignmentsForDriver(ctx, q, driverID)
 	if err != nil {
@@ -147,12 +163,21 @@ func EnsureDriverDailyTrips(ctx context.Context, q DBTX, schoolID, driverID, dat
 		var id string
 		err := q.QueryRow(ctx, `
 			INSERT INTO trips (school_id, trip_date, trip_type, route_id, bus_id, driver_id, created_by)
-			VALUES ($1, $2::date, $3, $4, $5, $6, NULL)
-			ON CONFLICT DO NOTHING RETURNING id`,
+			SELECT $1, $2::date, $3, $4, $5, $6, NULL
+			WHERE NOT EXISTS (
+				SELECT 1 FROM trips
+				WHERE school_id = $1 AND trip_date = $2::date AND trip_type = $3 AND status <> 'cancelled'
+					AND (route_id = $4 OR bus_id = $5)
+			)
+			RETURNING id`,
 			schoolID, date, asn.TripType, asn.RouteID, asn.BusID, driverID).Scan(&id)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				continue // a trip already occupies this slot - exactly the desired no-op
+				continue // the route or bus already has a trip this slot - exactly the desired no-op
+			}
+			var ce *ConflictError
+			if errors.As(mapErr(err), &ce) {
+				continue // e.g. trips_driver_slot_key: the driver already has a different schedule-less trip this date+type
 			}
 			return err
 		}

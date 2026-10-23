@@ -212,6 +212,7 @@ func New(d Deps) http.Handler {
 						r.Put("/routes/{routeID}/stops/{stopID}", a.UpdateStop)
 						r.Delete("/routes/{routeID}/stops/{stopID}", a.DeleteStop)
 						r.Get("/routes/{routeID}/students", a.RouteStudents)
+						r.Get("/routes/{routeID}/schedule", a.GetRouteScheduleHandler)
 
 						// Permanent Morning/Evening route assignment: set once, materialized daily
 						// into trips by GET /driver/trips (store.EnsureDriverDailyTrips).
@@ -260,6 +261,11 @@ func New(d Deps) http.Handler {
 						r.Put("/trips/{tripID}", a.UpdateTrip)
 						r.Post("/trips/{tripID}/cancel", a.CancelTrip)
 						r.Post("/trips/{tripID}/override", a.OverrideTrip)
+						r.Post("/trips/{tripID}/unassign", a.UnassignTrip)
+						r.Post("/trips/unassign", a.BulkUnassignTrips)
+						r.Post("/trips/unassign/preview", a.BulkUnassignPreview)
+						r.Patch("/trips/{tripID}/driver", a.ReassignTripDriver)
+						r.Patch("/trips/{tripID}/bus", a.ReassignTripBus)
 					})
 
 					r.Group(func(r chi.Router) {

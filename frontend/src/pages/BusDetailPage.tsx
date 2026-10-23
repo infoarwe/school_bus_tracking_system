@@ -144,7 +144,10 @@ function BusDetail({ schoolId }: { schoolId: string }) {
   const load = useMemo(() => {
     const ran = t.past.filter((x) => x.status !== 'cancelled')
     const peak = ran.reduce((m, x) => Math.max(m, x.student_count), 0)
-    return { peak, drivers: new Set(ran.map((x) => x.driver.id)).size }
+    return {
+      peak,
+      drivers: new Set(ran.map((x) => x.driver?.id).filter((id): id is string => !!id)).size,
+    }
   }, [t.past])
 
   if (!bus) return <LoadingOrError error={error} onRetry={loadBus} />
@@ -417,7 +420,7 @@ function BusDetail({ schoolId }: { schoolId: string }) {
               minWidth: 220,
             }}
           >
-            {t.current ? (
+            {t.current?.driver ? (
               <Avatar size={40} style={{ background: avatarColor(t.current.driver.id) }}>
                 {initials(t.current.driver.name)}
               </Avatar>
@@ -428,7 +431,7 @@ function BusDetail({ schoolId }: { schoolId: string }) {
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {t.running ? 'Driven now by' : 'Driver today'}
               </Typography.Text>
-              {t.current ? (
+              {t.current?.driver ? (
                 <>
                   <Link to={`/drivers/${t.current.driver.id}`} style={{ fontWeight: 600 }}>
                     {t.current.driver.name}
@@ -440,7 +443,7 @@ function BusDetail({ schoolId }: { schoolId: string }) {
                 </>
               ) : (
                 <Typography.Text type="secondary">
-                  {t.loading ? '…' : 'No trip today'}
+                  {t.loading ? '…' : t.current ? 'No driver assigned' : 'No trip today'}
                 </Typography.Text>
               )}
             </Flex>

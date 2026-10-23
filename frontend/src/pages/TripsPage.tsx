@@ -51,6 +51,7 @@ import {
   type Bus,
   type BusRoute,
   type Driver,
+  type RouteScheduleWindow,
   type Trip,
   type TripInput,
   type TripType,
@@ -106,6 +107,12 @@ function Trips({ schoolId }: { schoolId: string }) {
   } | null>(null)
   const [copying, setCopying] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [unassigning, setUnassigning] = useState<Trip | null>(null)
+  const [replacingDriver, setReplacingDriver] = useState<Trip | null>(null)
+  const [replacingBus, setReplacingBus] = useState<Trip | null>(null)
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([])
+  const [bulkUnassignOpen, setBulkUnassignOpen] = useState(false)
+  const [bulkUnassigning, setBulkUnassigning] = useState(false)
   const clock = useMemo(
     () =>
       new Intl.DateTimeFormat('en-GB', {
@@ -171,6 +178,15 @@ function Trips({ schoolId }: { schoolId: string }) {
           (r) => runsType(r) && r.stop_count > 0 && !active.some((t) => t.route?.id === r.id),
         )
   const past = date < today
+
+  // Selected trips with something left to unassign, computed fresh from the
+  // latest `trips` (re-derived from `dayTrips` on every reload) — never from
+  // a snapshot taken when the row was checked. A trip already unassigned
+  // (no bus and no driver, e.g. just unassigned via its own row action) no
+  // longer qualifies, even while its checkbox is still ticked, so Bulk
+  // Unassign can never re-offer to "unassign" a trip that has nothing left.
+  const selectedTrips = trips.filter((t) => selectedKeys.includes(t.id))
+  const unassignableSelected = selectedTrips.filter((t) => isOpen(t) && (t.bus || t.driver))
 
   return (
     <Flex vertical gap="middle">
@@ -307,12 +323,53 @@ function Trips({ schoolId }: { schoolId: string }) {
         />
       )}
 
+      {selectedKeys.length > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          title={`${selectedKeys.length} trip(s) selected`}
+          description={
+            <Flex vertical gap={4}>
+              <Space size="small">
+                {unassignableSelected.length > 0 ? (
+                  <Button size="small" danger onClick={() => setBulkUnassignOpen(true)}>
+                    Bulk unassign ({unassignableSelected.length})
+                  </Button>
+                ) : (
+                  <Typography.Text type="secondary">
+                    Selected trip(s) already have no bus or driver assigned — nothing to unassign.
+                  </Typography.Text>
+                )}
+                <Button size="small" onClick={() => setSelectedKeys([])}>
+                  Clear selection
+                </Button>
+              </Space>
+              {unassignableSelected.length > 0 &&
+                unassignableSelected.length < selectedTrips.length && (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {selectedTrips.length - unassignableSelected.length} of the selected trip(s)
+                    already have no bus or driver assigned and will be left out.
+                  </Typography.Text>
+                )}
+            </Flex>
+          }
+        />
+      )}
+
       <Table<Trip>
         rowKey="id"
         loading={loading}
         dataSource={trips}
         pagination={false}
         scroll={{ x: 1000 }}
+        rowSelection={{
+          selectedRowKeys: selectedKeys,
+          onChange: (keys) => setSelectedKeys(keys as string[]),
+          // Only an open trip (scheduled/confirmed) can be unassigned — a
+          // started/completed/cancelled trip is never offered for bulk
+          // selection, so "Select all" can never silently include one.
+          getCheckboxProps: (t) => ({ disabled: !isOpen(t) }),
+        }}
         locale={{
           emptyText:
             statusFilter !== 'all' && typeTrips.length ? (
@@ -356,48 +413,67 @@ function Trips({ schoolId }: { schoolId: string }) {
             ),
           },
           {
+            title: 'Time',
+            width: 110,
+            render: (_, t) =>
+              t.scheduled_start_at && t.scheduled_end_at ? (
+                <span>
+                  {time(t.scheduled_start_at)}–{time(t.scheduled_end_at)}
+                </span>
+              ) : (
+                <Typography.Text type="secondary">Not set</Typography.Text>
+              ),
+          },
+          {
             title: 'Bus',
             width: 170,
-            render: (_, t) => (
-              <Space size={6}>
-                <CarOutlined style={{ color: '#d97706' }} />
-                <Link to={`/buses/${t.bus.id}`} style={{ fontWeight: 500 }}>
-                  {t.bus.vehicle_number}
-                </Link>
-              </Space>
-            ),
+            render: (_, t) =>
+              t.bus ? (
+                <Space size={6}>
+                  <CarOutlined style={{ color: '#d97706' }} />
+                  <Link to={`/buses/${t.bus.id}`} style={{ fontWeight: 500 }}>
+                    {t.bus.vehicle_number}
+                  </Link>
+                </Space>
+              ) : (
+                <Tag>Unassigned</Tag>
+              ),
           },
           {
             title: 'Driver',
-            render: (_, t) => (
-              <Space size="small" align="center">
-                <Avatar size="small" style={{ background: avatarColor(t.driver.id) }}>
-                  {initials(t.driver.name)}
-                </Avatar>
-                <Flex vertical>
-                  <span>
-                    <Link to={`/drivers/${t.driver.id}`}>{t.driver.name}</Link>
-                    {t.assigned_by === 'driver' && (
-                      <Tag
-                        color="purple"
-                        style={{ marginInlineStart: 6 }}
-                        title="The driver took this route in the Driver app"
-                      >
-                        Self-assigned
-                      </Tag>
-                    )}
-                  </span>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {t.driver.mobile}
-                  </Typography.Text>
-                </Flex>
-              </Space>
-            ),
+            render: (_, t) =>
+              t.driver ? (
+                <Space size="small" align="center">
+                  <Avatar size="small" style={{ background: avatarColor(t.driver.id) }}>
+                    {initials(t.driver.name)}
+                  </Avatar>
+                  <Flex vertical>
+                    <span>
+                      <Link to={`/drivers/${t.driver.id}`}>{t.driver.name}</Link>
+                      {t.assigned_by === 'driver' && (
+                        <Tag
+                          color="purple"
+                          style={{ marginInlineStart: 6 }}
+                          title="The driver took this route in the Driver app"
+                        >
+                          Self-assigned
+                        </Tag>
+                      )}
+                    </span>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {t.driver.mobile}
+                    </Typography.Text>
+                  </Flex>
+                </Space>
+              ) : (
+                <Tag>Unassigned</Tag>
+              ),
           },
           {
             title: 'Students / seats',
             width: 150,
             render: (_, t) => {
+              if (!t.bus) return <Typography.Text type="secondary">—</Typography.Text>
               const over = t.student_count > t.bus.capacity
               return (
                 <Flex vertical>
@@ -446,13 +522,23 @@ function Trips({ schoolId }: { schoolId: string }) {
                 </Button>
                 {isOpen(t) && (
                   <Button size="small" onClick={() => setEditing(t)}>
-                    Edit
+                    {t.bus || t.driver ? 'Edit' : 'Assign'}
                   </Button>
                 )}
                 {(isOpen(t) || t.status === 'started') && (
                   <Dropdown
                     menu={{
                       items: [
+                        ...(isOpen(t) && (t.bus || t.driver)
+                          ? [{ key: 'unassign', label: 'Unassign bus & driver' }]
+                          : []),
+                        ...(isOpen(t) && t.driver
+                          ? [{ key: 'replace_driver', label: 'Replace driver' }]
+                          : []),
+                        ...(isOpen(t) && t.bus ? [{ key: 'replace_bus', label: 'Replace bus' }] : []),
+                        ...(isOpen(t) || t.status === 'started'
+                          ? [{ type: 'divider' as const }]
+                          : []),
                         ...(isOpen(t)
                           ? [{ key: 'cancel', label: 'Cancel trip', danger: true }]
                           : []),
@@ -465,7 +551,12 @@ function Trips({ schoolId }: { schoolId: string }) {
                           ? [{ key: 'cancelled', label: 'Override: cancel', danger: true }]
                           : []),
                       ],
-                      onClick: ({ key }) => setReasonFor({ trip: t, action: key as 'cancel' }),
+                      onClick: ({ key }) => {
+                        if (key === 'unassign') setUnassigning(t)
+                        else if (key === 'replace_driver') setReplacingDriver(t)
+                        else if (key === 'replace_bus') setReplacingBus(t)
+                        else setReasonFor({ trip: t, action: key as 'cancel' })
+                      },
                     }}
                   >
                     <Button size="small">
@@ -488,6 +579,7 @@ function Trips({ schoolId }: { schoolId: string }) {
           tripType={tripType}
           masters={masters}
           dayTrips={dayTrips}
+          timeZone={school?.timezone}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null)
@@ -526,6 +618,57 @@ function Trips({ schoolId }: { schoolId: string }) {
       {viewing && (
         <TripDetailDrawer schoolId={schoolId} tripId={viewing} onClose={() => setViewing(null)} />
       )}
+      {unassigning && (
+        <UnassignModal
+          schoolId={schoolId}
+          trip={unassigning}
+          onClose={() => setUnassigning(null)}
+          onDone={() => {
+            const id = unassigning.id
+            setSelectedKeys((keys) => keys.filter((k) => k !== id))
+            setUnassigning(null)
+            reload()
+          }}
+        />
+      )}
+      {replacingDriver && (
+        <ReplaceDriverModal
+          schoolId={schoolId}
+          trip={replacingDriver}
+          drivers={masters.drivers}
+          onClose={() => setReplacingDriver(null)}
+          onDone={() => {
+            setReplacingDriver(null)
+            reload()
+          }}
+        />
+      )}
+      {replacingBus && (
+        <ReplaceBusModal
+          schoolId={schoolId}
+          trip={replacingBus}
+          buses={masters.buses}
+          onClose={() => setReplacingBus(null)}
+          onDone={() => {
+            setReplacingBus(null)
+            reload()
+          }}
+        />
+      )}
+      {bulkUnassignOpen && (
+        <BulkUnassignModal
+          schoolId={schoolId}
+          trips={unassignableSelected}
+          busy={bulkUnassigning}
+          setBusy={setBulkUnassigning}
+          onClose={() => setBulkUnassignOpen(false)}
+          onDone={(successIds) => {
+            setBulkUnassignOpen(false)
+            setSelectedKeys((keys) => keys.filter((k) => !successIds.includes(k)))
+            reload()
+          }}
+        />
+      )}
     </Flex>
   )
 }
@@ -538,6 +681,7 @@ function TripForm({
   tripType,
   masters,
   dayTrips,
+  timeZone,
   onClose,
   onSaved,
 }: {
@@ -548,6 +692,7 @@ function TripForm({
   tripType: TripType
   masters: Masters
   dayTrips: Trip[]
+  timeZone?: string
   onClose: () => void
   onSaved: () => void
 }) {
@@ -557,19 +702,63 @@ function TripForm({
   const type = trip?.trip_type ?? tripType
   const special = type === 'special_trip'
   const routeId = Form.useWatch('route_id', form)
+  // HH:MM in the school's own time zone (not the admin's browser) — same
+  // convention as Trips' own `clock`/`time` helpers above.
+  const hhmm = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+        timeZone,
+      }),
+    [timeZone],
+  )
+  const toHHMM = (iso: string | null) => (iso ? hhmm.format(new Date(iso)) : null)
 
-  // Buses and drivers already used in this slot (other than by this trip) cannot be chosen.
+  // Prefill the schedule from the route's own stop times (never invented)
+  // when creating a brand-new trip and a route is chosen — only for a new
+  // trip: editing an existing one keeps its own already-saved schedule. The
+  // admin can still edit either field afterwards; this only sets a starting
+  // point, same as Trip Planner's Bulk Assign dialog.
+  const [routeWindow, setRouteWindow] = useState<RouteScheduleWindow | null>(null)
+  useEffect(() => {
+    if (trip || !routeId || special) return
+    let cancelled = false
+    routesApi.schedule(schoolId, routeId).then((s) => {
+      if (cancelled) return
+      const w = type === 'morning_pickup' ? s.morning_pickup : s.evening_drop
+      setRouteWindow(w)
+      form.setFieldsValue({
+        scheduled_start_time: w.start_time ?? undefined,
+        scheduled_end_time: w.end_time ?? undefined,
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [schoolId, routeId, type, trip, special, form])
+
+  // Other trips of this type today, for same-bus/driver/route context — no longer
+  // disabled (a bus/driver/route can now run more than one trip a day, as long as
+  // their scheduled times don't overlap), just shown so the admin can see what
+  // else that bus/driver/route is doing before picking a time. The backend's
+  // own overlap check (trips_{route,bus,driver}_no_overlap) is the real guard;
+  // see save()'s error handling below.
   const used = useMemo(() => {
     const slot = dayTrips.filter(
       (t) => t.trip_type === type && t.status !== 'cancelled' && t.id !== trip?.id,
     )
-    const label = (t: Trip) => t.route?.code ?? t.title
-    return {
-      routes: new Set(slot.map((t) => t.route?.id).filter((id): id is string => !!id)),
-      buses: new Map(slot.map((t) => [t.bus.id, label(t)])),
-      drivers: new Map(slot.map((t) => [t.driver.id, label(t)])),
+    const label = (t: Trip) => {
+      const time = t.scheduled_start_at ? hhmm.format(new Date(t.scheduled_start_at)) : null
+      const where = t.route?.code ?? t.title
+      return time ? `${where} ${time}` : where
     }
-  }, [dayTrips, type, trip])
+    return {
+      buses: new Map(slot.filter((t) => t.bus).map((t) => [t.bus!.id, label(t)])),
+      drivers: new Map(slot.filter((t) => t.driver).map((t) => [t.driver!.id, label(t)])),
+    }
+  }, [dayTrips, type, trip, hhmm])
 
   async function save(v: TripInput) {
     setSaving(true)
@@ -633,12 +822,14 @@ function TripForm({
           trip
             ? {
                 route_id: trip.route?.id,
-                bus_id: trip.bus.id,
-                driver_id: trip.driver.id,
+                bus_id: trip.bus?.id,
+                driver_id: trip.driver?.id,
                 notes: trip.notes,
                 title: trip.title,
                 notify_parents: trip.notify_parents,
                 waypoints: [],
+                scheduled_start_time: toHHMM(trip.scheduled_start_at) ?? undefined,
+                scheduled_end_time: toHHMM(trip.scheduled_end_at) ?? undefined,
               }
             : { route_id: initialRouteId, notify_parents: true }
         }
@@ -665,11 +856,38 @@ function TripForm({
             placeholder={special ? 'No template — ad-hoc destinations below' : undefined}
             options={routes.map((r) => ({
               value: r.id,
-              label: `${r.code} · ${r.name}${used.routes.has(r.id) ? ' (already has this trip)' : !special && r.stop_count === 0 ? ' (no stops yet)' : ''}`,
-              disabled: (!special && r.stop_count === 0) || used.routes.has(r.id),
+              label: `${r.code} · ${r.name}${!special && r.stop_count === 0 ? ' (no stops yet)' : ''}`,
+              disabled: !special && r.stop_count === 0,
             }))}
           />
         </Form.Item>
+        <Flex gap="small">
+          <Form.Item
+            name="scheduled_start_time"
+            label="Scheduled start"
+            style={{ flex: 1 }}
+            rules={[{ required: true, message: 'Give a start time.' }]}
+          >
+            <Input type="time" />
+          </Form.Item>
+          <Form.Item
+            name="scheduled_end_time"
+            label="Scheduled end"
+            style={{ flex: 1 }}
+            rules={[{ required: true, message: 'Give an end time.' }]}
+            extra="An end time at or before the start means the trip runs past midnight."
+          >
+            <Input type="time" />
+          </Form.Item>
+        </Flex>
+        {!special && routeId && !trip && routeWindow && !routeWindow.start_time && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            title={`This route's stops have no ${type === 'morning_pickup' ? 'pickup' : 'drop'} time configured yet — enter a schedule manually.`}
+          />
+        )}
         {special && !routeId && (
           <>
             <Form.Item
@@ -765,7 +983,7 @@ function TripForm({
           extra={
             masters.buses.length === 0
               ? 'No active buses. Add or activate one on the Buses page.'
-              : 'Buses already on another route in this slot are greyed out.'
+              : 'A bus can run more than one trip a day if the times don’t overlap — others today are noted below.'
           }
         >
           <Select
@@ -773,9 +991,8 @@ function TripForm({
             options={masters.buses.map((b) => ({
               value: b.id,
               label: used.buses.has(b.id)
-                ? `${b.vehicle_number} (on ${used.buses.get(b.id)})`
+                ? `${b.vehicle_number} (also on ${used.buses.get(b.id)})`
                 : `${b.vehicle_number} · ${b.capacity} seats`,
-              disabled: used.buses.has(b.id),
             }))}
           />
         </Form.Item>
@@ -794,9 +1011,8 @@ function TripForm({
             options={masters.drivers.map((d) => ({
               value: d.id,
               label: used.drivers.has(d.id)
-                ? `${d.name} (on ${used.drivers.get(d.id)})`
+                ? `${d.name} (also on ${used.drivers.get(d.id)})`
                 : `${d.name} · ${d.mobile}`,
-              disabled: used.drivers.has(d.id),
             }))}
           />
         </Form.Item>
@@ -886,6 +1102,286 @@ function ReasonModal({
         onChange={(e) => setReason(e.target.value)}
         autoFocus
       />
+    </Modal>
+  )
+}
+
+// UnassignModal: Part B, Single Trip Unassign. Shows the trip/date and its
+// current driver/bus before confirming; removes only the assignment
+// relationship — route, schedule, stops and students are untouched.
+function UnassignModal({
+  schoolId,
+  trip,
+  onClose,
+  onDone,
+}: {
+  schoolId: string
+  trip: Trip
+  onClose: () => void
+  onDone: () => void
+}) {
+  const { message } = App.useApp()
+  const [busy, setBusy] = useState(false)
+
+  async function submit() {
+    setBusy(true)
+    try {
+      await tripsApi.unassign(schoolId, trip.id)
+      message.success('Trip unassigned.')
+      onDone()
+    } catch (e) {
+      message.error(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open
+      title={`Unassign: ${trip.route?.code ?? trip.title} · ${formatDate(trip.trip_date)}`}
+      okText="Unassign"
+      okButtonProps={{ danger: true }}
+      confirmLoading={busy}
+      onOk={() => void submit()}
+      onCancel={onClose}
+    >
+      <Typography.Paragraph>
+        This removes the bus and driver from this trip only. The route, schedule, stops and students
+        stay exactly as they are, and the trip remains here to be reassigned.
+      </Typography.Paragraph>
+      <Space direction="vertical" size={4}>
+        <Typography.Text>
+          <strong>Current bus:</strong> {trip.bus?.vehicle_number ?? 'already unassigned'}
+        </Typography.Text>
+        <Typography.Text>
+          <strong>Current driver:</strong> {trip.driver?.name ?? 'already unassigned'}
+        </Typography.Text>
+      </Space>
+    </Modal>
+  )
+}
+
+// ReplaceDriverModal: Part D/E, Replace Driver. One atomic swap — bus, route,
+// schedule and everything else are untouched; the backend checks the new
+// driver's availability for this trip's exact scheduled time and rejects a
+// genuine overlap (preserving the original driver on failure).
+function ReplaceDriverModal({
+  schoolId,
+  trip,
+  drivers,
+  onClose,
+  onDone,
+}: {
+  schoolId: string
+  trip: Trip
+  drivers: Driver[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const { message } = App.useApp()
+  const [form] = Form.useForm<{ driver_id: string }>()
+  const [busy, setBusy] = useState(false)
+
+  async function submit(v: { driver_id: string }) {
+    setBusy(true)
+    try {
+      await tripsApi.reassignDriver(schoolId, trip.id, v.driver_id)
+      message.success('Driver replaced.')
+      onDone()
+    } catch (e) {
+      const msg = applyApiErrors(form, e)
+      if (msg) message.error(msg)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open
+      title={`Replace driver: ${trip.route?.code ?? trip.title} · ${formatDate(trip.trip_date)}`}
+      okText="Replace"
+      confirmLoading={busy}
+      onOk={() => form.submit()}
+      onCancel={onClose}
+    >
+      <Typography.Paragraph type="secondary">
+        Current driver: <strong>{trip.driver?.name ?? 'none'}</strong>.
+        {trip.scheduled_start_at && trip.scheduled_end_at && (
+          <>
+            {' '}
+            Scheduled {new Date(trip.scheduled_start_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–
+            {new Date(trip.scheduled_end_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.
+          </>
+        )}{' '}
+        The new driver is checked for a conflict at that exact time; the current driver is unaffected
+        if the replacement fails.
+      </Typography.Paragraph>
+      <Form form={form} layout="vertical" onFinish={(v) => void submit(v)}>
+        <Form.Item name="driver_id" label="New driver" rules={[{ required: true }]}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            placeholder="Choose a driver"
+            options={drivers
+              .filter((d) => d.id !== trip.driver?.id)
+              .map((d) => ({ value: d.id, label: `${d.name} · ${d.mobile}` }))}
+          />
+        </Form.Item>
+      </Form>
+    </Modal>
+  )
+}
+
+// ReplaceBusModal: Part F, Replace Bus. Same pattern as ReplaceDriverModal.
+function ReplaceBusModal({
+  schoolId,
+  trip,
+  buses,
+  onClose,
+  onDone,
+}: {
+  schoolId: string
+  trip: Trip
+  buses: Bus[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const { message } = App.useApp()
+  const [form] = Form.useForm<{ bus_id: string }>()
+  const [busy, setBusy] = useState(false)
+
+  async function submit(v: { bus_id: string }) {
+    setBusy(true)
+    try {
+      await tripsApi.reassignBus(schoolId, trip.id, v.bus_id)
+      message.success('Bus replaced.')
+      onDone()
+    } catch (e) {
+      const msg = applyApiErrors(form, e)
+      if (msg) message.error(msg)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open
+      title={`Replace bus: ${trip.route?.code ?? trip.title} · ${formatDate(trip.trip_date)}`}
+      okText="Replace"
+      confirmLoading={busy}
+      onOk={() => form.submit()}
+      onCancel={onClose}
+    >
+      <Typography.Paragraph type="secondary">
+        Current bus: <strong>{trip.bus?.vehicle_number ?? 'none'}</strong>. The new bus is checked for
+        a conflict at this trip's exact scheduled time; the current bus is unaffected if the
+        replacement fails.
+      </Typography.Paragraph>
+      <Form form={form} layout="vertical" onFinish={(v) => void submit(v)}>
+        <Form.Item name="bus_id" label="New bus" rules={[{ required: true }]}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            placeholder="Choose a bus"
+            options={buses
+              .filter((b) => b.id !== trip.bus?.id)
+              .map((b) => ({ value: b.id, label: `${b.vehicle_number} (${b.capacity} seats)` }))}
+          />
+        </Form.Item>
+      </Form>
+    </Modal>
+  )
+}
+
+// BulkUnassignModal: Part C, Bulk Unassign. Shows a confirmation summary of
+// exactly which selected trips will be unassigned, then reports a per-trip
+// result — never a single pass/fail for the whole batch.
+function BulkUnassignModal({
+  schoolId,
+  trips,
+  busy,
+  setBusy,
+  onClose,
+  onDone,
+}: {
+  schoolId: string
+  trips: Trip[]
+  busy: boolean
+  setBusy: (b: boolean) => void
+  onClose: () => void
+  // Only the trip IDs that actually succeeded — the caller clears just
+  // those from its selection, leaving any skipped one still selected (and,
+  // once reloaded, still correctly offered for Bulk Unassign again).
+  onDone: (successIds: string[]) => void
+}) {
+  const { message, modal } = App.useApp()
+
+  async function submit() {
+    setBusy(true)
+    try {
+      const res = await tripsApi.bulkUnassign(
+        schoolId,
+        trips.map((t) => t.id),
+      )
+      const ok = res.results.filter((r) => r.status === 'unassigned')
+      const failed = res.results.filter((r) => r.status === 'skipped')
+      if (failed.length === 0) {
+        message.success(`${ok.length} trip(s) unassigned.`)
+      } else {
+        modal.info({
+          title: `${ok.length} unassigned, ${failed.length} could not be`,
+          width: 560,
+          content: (
+            <ul style={{ paddingLeft: 18, maxHeight: 320, overflow: 'auto' }}>
+              {failed.map((f) => {
+                const t = trips.find((x) => x.id === f.trip_id)
+                return (
+                  <li key={f.trip_id}>
+                    {t ? `${t.route?.code ?? t.title} · ${formatDate(t.trip_date)}` : f.trip_id}:{' '}
+                    {f.reason}
+                  </li>
+                )
+              })}
+            </ul>
+          ),
+        })
+      }
+      onDone(ok.map((r) => r.trip_id))
+    } catch (e) {
+      message.error(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      open
+      title={`Unassign ${trips.length} trip(s)`}
+      okText={`Unassign ${trips.length}`}
+      okButtonProps={{ danger: true, disabled: trips.length === 0 }}
+      confirmLoading={busy}
+      onOk={() => void submit()}
+      onCancel={onClose}
+      width={560}
+    >
+      <Typography.Paragraph>
+        Each trip's bus and driver will be cleared; route, schedule, stops and students stay
+        unchanged. A trip already unassigned, or no longer open, is reported and skipped rather than
+        failing the whole batch.
+      </Typography.Paragraph>
+      <ul style={{ paddingLeft: 18, maxHeight: 240, overflow: 'auto' }}>
+        {trips.map((t) => (
+          <li key={t.id}>
+            {t.route?.code ?? t.title} · {formatDate(t.trip_date)} · {tripTypeLabels[t.trip_type]}
+            {' — '}
+            {t.bus?.vehicle_number ?? 'no bus'} / {t.driver?.name ?? 'no driver'}
+          </li>
+        ))}
+      </ul>
     </Modal>
   )
 }

@@ -247,6 +247,23 @@ type TripRoute struct {
 	StopCount int    `json:"stop_count"`
 }
 
+// TripBus is the bus a trip is assigned to. Nil when the trip has been
+// unassigned (see Part B/C "Unassign"/"Bulk Unassign") — never invented, same
+// nullability pattern as TripRoute.
+type TripBus struct {
+	ID            string `json:"id"`
+	VehicleNumber string `json:"vehicle_number"`
+	Capacity      int    `json:"capacity"`
+}
+
+// TripDriver is the driver a trip is assigned to. Nil when the trip has been
+// unassigned; same pattern as TripBus/TripRoute.
+type TripDriver struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Mobile string `json:"mobile"`
+}
+
 // Trip is one daily assignment: Driver + Bus + Route (or ad-hoc waypoints) + Date + Trip Type.
 type Trip struct {
 	ID       string `json:"id"`
@@ -256,16 +273,21 @@ type Trip struct {
 	Status   string `json:"status"`
 	// Route is null for a routeless Special Trip/Outing; Title is shown instead.
 	Route *TripRoute `json:"route"`
-	Bus   struct {
-		ID            string `json:"id"`
-		VehicleNumber string `json:"vehicle_number"`
-		Capacity      int    `json:"capacity"`
-	} `json:"bus"`
-	Driver struct {
-		ID     string `json:"id"`
-		Name   string `json:"name"`
-		Mobile string `json:"mobile"`
-	} `json:"driver"`
+	// Bus/Driver are null exactly when that part of the assignment has been
+	// removed (Unassign clears both together; a trip is never created without
+	// both). A nil Bus/Driver never participates in overlap/slot-key checks
+	// (Postgres never matches NULL = NULL), and is excluded from every
+	// driver-app and parent-tracking trip list (those filter by a specific,
+	// non-null driver_id/route_id already) — see pickChildTrip.
+	Bus    *TripBus    `json:"bus"`
+	Driver *TripDriver `json:"driver"`
+	// Scheduled window: when this specific trip is planned to run. Nil when never
+	// set (a trip created before this field existed, or one whose route has no
+	// stop times to derive it from) — such a trip has no overlap protection
+	// against other trips on the same bus/driver/route (see trips_bus_no_overlap
+	// etc.), exactly as before this field was introduced.
+	ScheduledStartAt *time.Time `json:"scheduled_start_at"`
+	ScheduledEndAt   *time.Time `json:"scheduled_end_at"`
 	// Students assigned to the route with a stop for this trip type (0 for a special_trip).
 	StudentCount int    `json:"student_count"`
 	Title        string `json:"title"` // Special Trip/Outing name; "" for route-based trips

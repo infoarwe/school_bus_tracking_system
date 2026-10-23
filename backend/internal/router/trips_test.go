@@ -67,26 +67,40 @@ func (f *tripFixture) trip(date, tripType, route, bus, driver string) map[string
 	return map[string]any{"trip_date": date, "trip_type": tripType, "route_id": route, "bus_id": bus, "driver_id": driver}
 }
 
+// tripAt is f.trip with an explicit scheduled window — use this whenever a
+// test cares about overlap conflicts (f.trip alone has no schedule, and so no
+// automatic conflict protection at all — see validateTrip).
+func (f *tripFixture) tripAt(date, tripType, route, bus, driver, start, end string) map[string]any {
+	b := f.trip(date, tripType, route, bus, driver)
+	b["scheduled_start_time"], b["scheduled_end_time"] = start, end
+	return b
+}
+
 func TestTripAssignmentRules(t *testing.T) {
 	e := newEnv(t)
 	f := newTripFixture(e)
 	trips := f.base + "/trips"
 
-	morning := e.do("POST", trips, f.tm, f.trip(f.today, "morning_pickup", f.route, f.bus1, f.driver1))
+	morning := e.do("POST", trips, f.tm, f.tripAt(f.today, "morning_pickup", f.route, f.bus1, f.driver1, "07:30", "08:15"))
 	e.expect(morning, 201, "")
 	m := morning.data()
 	if m["status"] != "scheduled" || m["student_count"] != float64(1) || m["route"].(map[string]any)["code"] != "RS-01" {
 		t.Fatalf("trip = %v", m)
 	}
+	if m["scheduled_start_at"] == nil || m["scheduled_end_at"] == nil {
+		t.Errorf("scheduled window should be set: %v", m)
+	}
 
-	// One route, bus and driver per date + trip type (rule 3).
+	// A route, bus or driver with an OVERLAPPING trip is rejected (rule 3,
+	// now time-based rather than "any trip that day"): each new trip below
+	// overlaps the 07:30–08:15 trip above on the dimension named.
 	for _, c := range []struct {
 		body  map[string]any
 		field string
 	}{
-		{f.trip(f.today, "morning_pickup", f.route, f.bus2, f.driver2), "route_id"},
-		{f.trip(f.today, "morning_pickup", f.pickupOnlyRoute, f.bus1, f.driver2), "bus_id"},
-		{f.trip(f.today, "morning_pickup", f.pickupOnlyRoute, f.bus2, f.driver1), "driver_id"},
+		{f.tripAt(f.today, "morning_pickup", f.route, f.bus2, f.driver2, "08:00", "08:30"), "route_id"},
+		{f.tripAt(f.today, "morning_pickup", f.pickupOnlyRoute, f.bus1, f.driver2, "08:00", "08:30"), "bus_id"},
+		{f.tripAt(f.today, "morning_pickup", f.pickupOnlyRoute, f.bus2, f.driver1, "08:00", "08:30"), "driver_id"},
 	} {
 		r := e.do("POST", trips, f.tm, c.body)
 		e.expect(r, 409, "trip_conflict")
@@ -94,7 +108,22 @@ func TestTripAssignmentRules(t *testing.T) {
 			t.Errorf("conflict should name %s: %v", c.field, r.Body)
 		}
 	}
-	// Evening Drop is a separate trip (rule 4): same bus and driver are fine.
+
+	// The whole point of this feature: the SAME route, bus and driver can run
+	// a second, later trip the same day as long as it doesn't overlap the
+	// first (07:30–08:15) — back-to-back (08:15 start) is allowed too.
+	second := e.do("POST", trips, f.tm, f.tripAt(f.today, "morning_pickup", f.route, f.bus1, f.driver1, "08:15", "09:00"))
+	e.expect(second, 201, "")
+	// A third trip on a DIFFERENT route, same bus+driver, later still — the
+	// user-facing scenario this feature exists for.
+	third := e.do("POST", trips, f.tm, f.tripAt(f.today, "morning_pickup", f.pickupOnlyRoute, f.bus1, f.driver1, "09:30", "10:00"))
+	e.expect(third, 201, "")
+	// But a trip overlapping either of those two is still rejected.
+	e.expect(e.do("POST", trips, f.tm, f.tripAt(f.today, "morning_pickup", f.pickupOnlyRoute, f.bus1, f.driver2, "08:30", "09:00")), 409, "trip_conflict")
+
+	// Evening Drop is a separate trip (rule 4): same bus and driver are fine,
+	// and so is a trip with no schedule at all (legacy-compatible: never
+	// forced to invent a time, simply has no overlap protection of its own).
 	e.expect(e.do("POST", trips, f.tm, f.trip(f.today, "evening_drop", f.route, f.bus1, f.driver1)), 201, "")
 
 	// Validation.
@@ -109,11 +138,14 @@ func TestTripAssignmentRules(t *testing.T) {
 	e.expect(e.do("POST", trips+"/"+id+"/cancel", f.tm, map[string]string{"reason": ""}), 400, "validation_failed")
 	e.expect(e.do("POST", trips+"/"+id+"/cancel", f.tm, map[string]string{"reason": "Holiday"}), 200, "")
 	e.expect(e.do("POST", trips+"/"+id+"/cancel", f.tm, map[string]string{"reason": "again"}), 409, "invalid_transition")
-	e.expect(e.do("POST", trips, f.tm, f.trip(f.today, "morning_pickup", f.route, f.bus2, f.driver2)), 201, "")
+	// f.route already has "second" (08:15-09:00, still active) on it — this
+	// feature allows that, so a schedule-less request would correctly clash
+	// with it (nothing to compare against); give this one a clear window.
+	e.expect(e.do("POST", trips, f.tm, f.tripAt(f.today, "morning_pickup", f.route, f.bus2, f.driver2, "11:00", "11:30")), 201, "")
 
 	list := e.do("GET", trips+"?date="+f.today, f.tm, nil)
-	if n := len(list.list()); n != 3 {
-		t.Errorf("trips today = %d, want 3 (incl. cancelled)", n)
+	if n := len(list.list()); n != 5 {
+		t.Errorf("trips today = %d, want 5 (incl. cancelled)", n)
 	}
 	if n := len(e.do("GET", trips+"?date="+f.today+"&status=cancelled", f.tm, nil).list()); n != 1 {
 		t.Errorf("cancelled filter = %d", n)
@@ -248,7 +280,11 @@ func TestBulkTripsAndCalendar(t *testing.T) {
 	for _, s := range r.data()["skipped"].([]any) {
 		sk := s.(map[string]any)
 		if sk["trip_date"] == f.tomorrow && sk["trip_type"] == "morning_pickup" {
-			driverClash = sk["reason"] == "driver is already on another trip" && sk["route_code"] == "RS-01"
+			// Caught by validateTrip's own pre-check now (it runs for every
+			// trip, schedule or none, not just insertTripIfFree's ON CONFLICT
+			// fallback), so the reason is its field-level message, not the
+			// raw TripSlotClash string.
+			driverClash = sk["reason"] == "driver: This driver already has an overlapping trip at that time." && sk["route_code"] == "RS-01"
 		}
 	}
 	if !driverClash {

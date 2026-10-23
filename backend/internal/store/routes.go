@@ -88,6 +88,53 @@ func UpdateRoute(ctx context.Context, q DBTX, schoolID, id string, in RouteInput
 	return GetRoute(ctx, q, schoolID, id)
 }
 
+// RouteSchedule is what Morning Pickup and/or Evening Drop actually run as for
+// this route, derived live from its stops' own pickup_time/drop_time (the
+// same source of truth Daily Trips and Trip Planner should both prefill
+// from) — never invented when a type isn't supported or its stops carry no
+// time at all. StartTime/EndTime are nil exactly when there's nothing to
+// derive (route doesn't run that type, or none of its stops have that time
+// set yet); SupportsPickup/SupportsDrop still say whether the type applies
+// at all, so the caller can tell "not configured yet" from "doesn't run".
+type RouteSchedule struct {
+	SupportsPickup, SupportsDrop   bool
+	PickupStartTime, PickupEndTime *string // HH:MM
+	DropStartTime, DropEndTime     *string // HH:MM
+}
+
+// GetRouteSchedule computes the window the same way migration 00019's
+// one-time backfill did (earliest stop time = start, latest + 15 min
+// nominal arrival buffer = end) — but live, from the route's current stops,
+// so it stays correct as stops are added, reordered or retimed. Morning
+// Pickup considers every stop (sequence is never null: every stop is part
+// of the pickup leg). Evening Drop considers only stops with a non-null
+// drop_sequence — a stop can carry a drop_time yet not be part of the
+// evening leg at all (CLAUDE.md: "null if this stop is not part of the
+// evening leg"), and including it would wrongly widen the derived window.
+func GetRouteSchedule(ctx context.Context, q DBTX, schoolID, routeID string) (*RouteSchedule, error) {
+	var out RouteSchedule
+	if err := q.QueryRow(ctx, `SELECT supports_pickup, supports_drop FROM routes WHERE id = $1 AND school_id = $2`,
+		routeID, schoolID).Scan(&out.SupportsPickup, &out.SupportsDrop); err != nil {
+		return nil, mapErr(err)
+	}
+	err := q.QueryRow(ctx, `
+		SELECT to_char(min(pickup_time), 'HH24:MI'), to_char(max(pickup_time) + interval '15 minutes', 'HH24:MI'),
+			to_char(min(drop_time) FILTER (WHERE drop_sequence IS NOT NULL), 'HH24:MI'),
+			to_char(max(drop_time) FILTER (WHERE drop_sequence IS NOT NULL) + interval '15 minutes', 'HH24:MI')
+		FROM stops WHERE route_id = $1`, routeID).
+		Scan(&out.PickupStartTime, &out.PickupEndTime, &out.DropStartTime, &out.DropEndTime)
+	if err != nil {
+		return nil, err
+	}
+	if !out.SupportsPickup {
+		out.PickupStartTime, out.PickupEndTime = nil, nil
+	}
+	if !out.SupportsDrop {
+		out.DropStartTime, out.DropEndTime = nil, nil
+	}
+	return &out, nil
+}
+
 func SetRouteStatus(ctx context.Context, q DBTX, schoolID, id, status string) (*models.Route, error) {
 	tag, err := q.Exec(ctx, `UPDATE routes SET status = $3 WHERE id = $1 AND school_id = $2`, id, schoolID, status)
 	if err != nil {

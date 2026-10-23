@@ -48,12 +48,31 @@ var claimConflicts = map[string]httpx.ErrorBody{
 	"trips_driver_slot_key": {Code: "already_assigned", Message: "You already have a route for this trip. Release it first to take another."},
 }
 
+// Same conflicts, keyed by request field instead of DB constraint name —
+// validateTrip's own TripSlotClash pre-check (which runs ahead of the
+// insert, for every trip including a schedule-less claim) reports a clash
+// this way as a generic *tripError before the DB is ever touched.
+var claimConflictsByField = map[string]httpx.ErrorBody{
+	"route_id":  claimConflicts["trips_route_slot_key"],
+	"bus_id":    claimConflicts["trips_bus_slot_key"],
+	"driver_id": claimConflicts["trips_driver_slot_key"],
+}
+
 func writeClaimError(w http.ResponseWriter, r *http.Request, err error) {
 	var ce *store.ConflictError
 	if errors.As(err, &ce) {
 		if body, ok := claimConflicts[ce.Constraint]; ok {
 			httpx.ErrorWithFields(w, http.StatusConflict, body)
 			return
+		}
+	}
+	var te *tripError
+	if errors.As(err, &te) && te.body.Code == "trip_conflict" {
+		for field := range te.body.Fields {
+			if body, ok := claimConflictsByField[field]; ok {
+				httpx.ErrorWithFields(w, http.StatusConflict, body)
+				return
+			}
 		}
 	}
 	writeTripError(w, r, err)
@@ -254,7 +273,7 @@ func (a *API) DriverClaimRoute(w http.ResponseWriter, r *http.Request) {
 
 		tr := tripRequest{TripDate: req.TripDate, TripType: req.TripType, RouteID: req.RouteID,
 			BusID: req.BusID, DriverID: d.ID}
-		if err := validateTrip(ctx, q, d.SchoolID, &tr); err != nil {
+		if err := validateTrip(ctx, q, d.SchoolID, "", false, false, &tr); err != nil {
 			return err
 		}
 		id, err := store.CreateTrip(ctx, q, d.SchoolID, p.UserID, tr.input())

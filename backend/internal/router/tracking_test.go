@@ -59,7 +59,8 @@ func TestLocationIngest(t *testing.T) {
 		t.Fatalf("live snapshot = %v", snap.list())
 	}
 	bus := snap.list()[0].(map[string]any)
-	if bus["bus_number"] != "TN-38-AB-1234" || bus["latitude"] != 11.0175 || bus["route_code"] != "RS-01" {
+	if bus["bus_number"] != "TN-38-AB-1234" || bus["latitude"] != 11.0175 || bus["route_code"] != "RS-01" ||
+		bus["trip_title"] != "" {
 		t.Errorf("live bus = %v", bus)
 	}
 	var stored int
@@ -84,6 +85,70 @@ func TestLocationIngest(t *testing.T) {
 		t.Errorf("ended trip still live: %d", n)
 	}
 	e.expect(e.do("POST", url, f.driver1Tok, batch), 409, "trip_not_started")
+}
+
+// TestLiveRouteCodeTracksCurrentTripNotTheBus: the same bus running two
+// different routes (one trip ends, another starts) must show each trip's
+// own actual assigned route in the live snapshot — never a stale or
+// bus-derived route code left over from the previous trip.
+func TestLiveRouteCodeTracksCurrentTripNotTheBus(t *testing.T) {
+	e := newEnv(t)
+	f := newTripFixture(e)
+
+	// f.pickupOnlyRoute (RS-02) only runs Morning Pickup; f.route (RS-01)
+	// runs both — so trip1 uses the pickup-only route for Morning Pickup,
+	// and trip2 reuses the same bus/driver on the OTHER route for Evening
+	// Drop that same day (no clash: different trip type).
+	trip1 := e.do("POST", f.base+"/trips", f.tm, f.trip(f.today, "morning_pickup", f.pickupOnlyRoute, f.bus1, f.driver1)).data()["id"].(string)
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+trip1+"/confirm", f.driver1Tok, nil), 200, "")
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+trip1+"/start", f.driver1Tok, nil), 200, "")
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+trip1+"/locations", f.driver1Tok,
+		map[string]any{"points": []any{point(11.0168, 76.9663, time.Second)}}), 200, "")
+	snap1 := e.do("GET", f.base+"/live", f.tm, nil).list()
+	if len(snap1) != 1 || snap1[0].(map[string]any)["route_code"] != "RS-02" {
+		t.Fatalf("trip1 live snapshot = %v, want route_code RS-02", snap1)
+	}
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+trip1+"/end", f.driver1Tok, nil), 200, "")
+
+	trip2 := e.do("POST", f.base+"/trips", f.tm, f.trip(f.today, "evening_drop", f.route, f.bus1, f.driver1)).data()["id"].(string)
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+trip2+"/confirm", f.driver1Tok, nil), 200, "")
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+trip2+"/start", f.driver1Tok, nil), 200, "")
+	e.expect(e.do("POST", "/api/v1/driver/trips/"+trip2+"/locations", f.driver1Tok,
+		map[string]any{"points": []any{point(11.0168, 76.9663, time.Second)}}), 200, "")
+	snap2 := e.do("GET", f.base+"/live", f.tm, nil).list()
+	if len(snap2) != 1 || snap2[0].(map[string]any)["route_code"] != "RS-01" ||
+		snap2[0].(map[string]any)["bus_number"] != "TN-38-AB-1234" {
+		t.Fatalf("trip2 live snapshot = %v, want route_code RS-01 for the same bus TN-38-AB-1234", snap2)
+	}
+}
+
+// TestLocationIngestRoutelessSpecialTrip: a routeless Special Trip/Outing has
+// no route_code (never fabricated from the bus number) — its live location
+// instead carries trip_title, the Live Tracking screen's fallback label.
+func TestLocationIngestRoutelessSpecialTrip(t *testing.T) {
+	e := newEnv(t)
+	f := newTripFixture(e)
+	trips := f.base + "/trips"
+
+	waypoints := []map[string]any{wp("Science Museum", 11.02, 76.97)}
+	out := e.do("POST", trips, f.tm, f.specialTrip(f.today, "", "Museum Trip", waypoints, f.bus1, f.driver1, nil))
+	e.expect(out, 201, "")
+	tripID := out.data()["id"].(string)
+	e.expect(e.do("POST", trips+"/"+tripID+"/override", f.tm, map[string]string{"status": "started", "reason": "go"}), 200, "")
+
+	url := "/api/v1/driver/trips/" + tripID + "/locations"
+	// Far from the one waypoint, so no stop-reached event fires on this first
+	// fix — this test only cares about the live snapshot's trip_title/route_code.
+	e.expect(e.do("POST", url, f.driver1Tok, map[string]any{"points": []any{point(11.5, 77.5, time.Second)}}), 200, "")
+
+	snap := e.do("GET", f.base+"/live", f.tm, nil)
+	if len(snap.list()) != 1 {
+		t.Fatalf("live snapshot = %v", snap.list())
+	}
+	bus := snap.list()[0].(map[string]any)
+	if bus["route_code"] != "" || bus["trip_title"] != "Museum Trip" {
+		t.Errorf("routeless outing's live bus should have no route_code but trip_title set: %v", bus)
+	}
 }
 
 // wsConn is a test WebSocket client.

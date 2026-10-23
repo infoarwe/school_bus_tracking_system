@@ -162,13 +162,20 @@ func TestSpecialTripWithoutRoute(t *testing.T) {
 	}
 	e.expect(e.do("GET", trips+"/"+outID+"/progress", f.tm, nil), 200, "")
 
-	// Bus/driver conflict: one special_trip per bus (and per driver) per date,
-	// just like the other two trip types.
-	e.expect(e.do("POST", trips, f.tm, f.specialTrip(f.dayFrom, "", "Trip A", waypoints, f.bus1, f.driver1, nil)), 201, "")
-	busClash := e.do("POST", trips, f.tm, f.specialTrip(f.dayFrom, "", "Trip B", waypoints, f.bus1, f.driver2, nil))
+	// Bus/driver conflict: an OVERLAPPING special_trip on the same bus (or
+	// driver) is rejected, same as the other two trip types — but, unlike
+	// before this feature, only when the times actually overlap.
+	withTime := func(body map[string]any, start, end string) map[string]any {
+		body["scheduled_start_time"], body["scheduled_end_time"] = start, end
+		return body
+	}
+	e.expect(e.do("POST", trips, f.tm, withTime(f.specialTrip(f.dayFrom, "", "Trip A", waypoints, f.bus1, f.driver1, nil), "09:00", "11:00")), 201, "")
+	busClash := e.do("POST", trips, f.tm, withTime(f.specialTrip(f.dayFrom, "", "Trip B", waypoints, f.bus1, f.driver2, nil), "10:00", "12:00"))
 	e.expect(busClash, 409, "trip_conflict")
-	driverClash := e.do("POST", trips, f.tm, f.specialTrip(f.dayFrom, "", "Trip C", waypoints, f.bus2, f.driver1, nil))
+	driverClash := e.do("POST", trips, f.tm, withTime(f.specialTrip(f.dayFrom, "", "Trip C", waypoints, f.bus2, f.driver1, nil), "10:00", "12:00"))
 	e.expect(driverClash, 409, "trip_conflict")
+	// A second, later, non-overlapping outing on the SAME bus and driver is fine.
+	e.expect(e.do("POST", trips, f.tm, withTime(f.specialTrip(f.dayFrom, "", "Trip D", waypoints, f.bus1, f.driver1, nil), "13:00", "15:00")), 201, "")
 }
 
 // Requirement #5/#6: a Special Trip/Outing based on a template route notifies

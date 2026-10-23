@@ -96,7 +96,7 @@ export default function LiveBusesPanel({
           <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
             {waiting.length > 0
               ? `${waiting.length} trip(s) started and waiting for the first GPS update from the Driver app: ${waiting
-                  .map((t) => `${t.bus.vehicle_number} (${t.route?.code ?? t.title})`)
+                  .map((t) => `${t.bus?.vehicle_number ?? '?'} (${t.route?.code ?? t.title})`)
                   .join(', ')}.`
               : upcoming.length > 0
                 ? `${upcoming.length} trip(s) planned today. Buses appear here when drivers start their trips.`

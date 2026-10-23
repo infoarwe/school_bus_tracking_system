@@ -63,8 +63,8 @@ function slot(r: RouteRow, type: TripType, trips: Trip[] | null, route?: BusRout
     status: released ? null : status,
     selfAssigned: !!active && active.assigned_by === 'driver',
     needsDriver: runs && (status === null || released),
-    bus: active?.bus.vehicle_number ?? (type === 'morning_pickup' ? r.morning_bus : r.evening_bus),
-    driver: active?.driver.name ?? null,
+    bus: active?.bus?.vehicle_number ?? (type === 'morning_pickup' ? r.morning_bus : r.evening_bus),
+    driver: active?.driver?.name ?? null,
   }
 }
 

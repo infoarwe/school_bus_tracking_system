@@ -25,7 +25,12 @@ type RouteSlot struct {
 }
 
 // RouteSlots lists the school's active routes that run tripType and have stops,
-// with the non-cancelled trip (if any) on date.
+// with the non-cancelled trip (if any) on date. A route can now have more than
+// one non-cancelled trip of the same type and date (different scheduled
+// times) — this still surfaces only one (the earliest-created) as "the" trip
+// holding the slot, preserving the existing one-claim-per-route-per-day
+// self-assignment behavior; a LEFT JOIN here would instead silently return one
+// duplicate RouteSlot row per extra trip.
 func RouteSlots(ctx context.Context, q DBTX, schoolID, date, tripType string) ([]RouteSlot, error) {
 	rows, err := q.Query(ctx, `
 		SELECT r.id, r.code, r.name, r.start_point,
@@ -35,8 +40,11 @@ func RouteSlots(ctx context.Context, q DBTX, schoolID, date, tripType string) ([
 				AND CASE WHEN $3 = 'morning_pickup' THEN sa.pickup_stop_id ELSE sa.drop_stop_id END IS NOT NULL),
 			t.id, t.status, t.driver_id, t.bus_id
 		FROM routes r
-		LEFT JOIN trips t ON t.route_id = r.id AND t.trip_date = $2::date AND t.trip_type = $3
-			AND t.status <> 'cancelled'
+		LEFT JOIN LATERAL (
+			SELECT id, status, driver_id, bus_id FROM trips
+			WHERE route_id = r.id AND trip_date = $2::date AND trip_type = $3 AND status <> 'cancelled'
+			ORDER BY created_at LIMIT 1
+		) t ON true
 		WHERE r.school_id = $1 AND r.status = 'active'
 			AND CASE WHEN $3 = 'morning_pickup' THEN r.supports_pickup ELSE r.supports_drop END
 			AND EXISTS (SELECT 1 FROM stops s WHERE s.route_id = r.id)
@@ -97,12 +105,17 @@ type SlotBus struct {
 	TripID *string `json:"-"`
 }
 
+// SlotBuses: same duplicate-row risk as RouteSlots once a bus can have more
+// than one non-cancelled trip of this type/date — bounded the same way.
 func SlotBuses(ctx context.Context, q DBTX, schoolID, date, tripType string) ([]SlotBus, error) {
 	rows, err := q.Query(ctx, `
 		SELECT b.id, b.vehicle_number, b.capacity, t.id
 		FROM buses b
-		LEFT JOIN trips t ON t.bus_id = b.id AND t.trip_date = $2::date AND t.trip_type = $3
-			AND t.status <> 'cancelled'
+		LEFT JOIN LATERAL (
+			SELECT id FROM trips
+			WHERE bus_id = b.id AND trip_date = $2::date AND trip_type = $3 AND status <> 'cancelled'
+			ORDER BY created_at LIMIT 1
+		) t ON true
 		WHERE b.school_id = $1 AND b.status = 'active'
 		ORDER BY b.vehicle_number`, schoolID, date, tripType)
 	if err != nil {

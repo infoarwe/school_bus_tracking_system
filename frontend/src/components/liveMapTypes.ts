@@ -24,6 +24,18 @@ export function busState(b: BusLocation): BusState {
   return (b.speed_mps ?? 0) > 1 ? 'moving' : 'stopped'
 }
 
+/**
+ * The bus's primary identifier on Live Tracking: its assigned route code
+ * (e.g. "RS-7") — never derived or guessed from the bus registration number,
+ * only ever the actual route on the trip it's currently running. A routeless
+ * Special Trip/Outing has no route code at all, so it falls back to the
+ * outing's own name; the rare case of neither (should not happen in
+ * practice) falls back to a generic label rather than showing nothing.
+ */
+export function primaryLabel(b: BusLocation): string {
+  return b.route_code || b.trip_title || 'Trip'
+}
+
 export interface LiveMapProps {
   buses: BusLocation[]
   selectedId: string | null

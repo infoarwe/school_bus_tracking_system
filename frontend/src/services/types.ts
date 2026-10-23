@@ -169,6 +169,20 @@ export interface RouteInput {
   supports_outing: boolean
 }
 
+/** What a route's Morning Pickup/Evening Drop actually run as, derived live from its
+ * stops' own pickup_time/drop_time (GET /routes/{id}/schedule). `supported` false means
+ * the route doesn't run that type at all; `supported` true with null times means it does,
+ * but none of its stops have a time set yet — never invented, the admin enters one. */
+export interface RouteScheduleWindow {
+  supported: boolean
+  start_time: string | null
+  end_time: string | null
+}
+export interface RouteSchedule {
+  morning_pickup: RouteScheduleWindow
+  evening_drop: RouteScheduleWindow
+}
+
 export interface BusRoute extends RouteInput {
   id: string
   school_id: string
@@ -342,6 +356,14 @@ export interface TripInput {
   notify_parents?: boolean
   /** special_trip without route_id only: the ad-hoc destinations, in order. */
   waypoints?: WaypointInput[]
+  /**
+   * HH:MM, school-local. Give both or neither — required in practice so this
+   * trip gets overlap protection against the same bus/driver/route's other
+   * trips that day; only a copy/bulk-create of a legacy trip with no schedule
+   * of its own may legitimately send neither.
+   */
+  scheduled_start_time?: string
+  scheduled_end_time?: string
 }
 
 export interface Trip {
@@ -352,8 +374,12 @@ export interface Trip {
   status: TripStatus
   /** Null for a routeless Special Trip/Outing; title is shown instead. */
   route: { id: string; code: string; name: string; stop_count: number } | null
-  bus: { id: string; vehicle_number: string; capacity: number }
-  driver: { id: string; name: string; mobile: string }
+  /** Null exactly when this trip has been unassigned (bus and driver are cleared together). */
+  bus: { id: string; vehicle_number: string; capacity: number } | null
+  driver: { id: string; name: string; mobile: string } | null
+  /** Null for a trip created before this field existed, or whose route has no stop times to derive it from. */
+  scheduled_start_at: string | null
+  scheduled_end_at: string | null
   student_count: number
   /** Special Trip/Outing name; "" for route-based trips. */
   title: string
@@ -397,7 +423,10 @@ export interface TripListParams extends ListParams {
   sort?: 'asc'
 }
 
-/** POST /trips/bulk: one route + bus + driver on many dates. */
+/** POST /trips/bulk: one route + bus + driver on many dates. Morning Pickup and
+ * Evening Drop never run at the same time of day, so each included type needs its
+ * own window; empty (both omitted for a type) = no schedule, same as a single trip's
+ * scheduled_start_time/end_time — never invented, never forced. */
 export interface BulkTripsInput {
   dates: string[]
   trip_types: ('morning_pickup' | 'evening_drop')[]
@@ -405,6 +434,39 @@ export interface BulkTripsInput {
   bus_id: string
   driver_id: string
   notes?: string
+  morning_start_time?: string
+  morning_end_time?: string
+  evening_start_time?: string
+  evening_end_time?: string
+}
+
+/** POST /trips/unassign (and .../unassign/preview): the date-range/All Dates
+ * alternative to an explicit trip_ids list — Trip Planner's cross-date Bulk
+ * Unassign. At least one of all_dates/from/to is required; the rest narrow
+ * it further and are all optional. */
+export interface BulkUnassignFilter {
+  all_dates?: boolean
+  from?: string
+  to?: string
+  route_id?: string
+  bus_id?: string
+  driver_id?: string
+  trip_type?: TripType
+}
+
+export interface BulkUnassignResult {
+  results: { trip_id: string; status: 'unassigned' | 'skipped'; reason?: string }[]
+}
+
+/** POST /trips/unassign/preview: scope + auto-detected date span for a filter. */
+export interface BulkUnassignPreviewResult {
+  count: number
+  eligible: number
+  ineligible: number
+  from: string | null
+  to: string | null
+  over_limit: boolean
+  limit: number
 }
 
 /** GET /trips/calendar: trip counts of one date + trip type. */

@@ -390,6 +390,9 @@ func pickChildTrip(trips []models.Trip, as *models.StudentAssignment) (*models.T
 		if stopFor(t) == nil {
 			continue // the child does not ride this trip type
 		}
+		if t.Bus == nil || t.Driver == nil {
+			continue // unassigned: nothing live to show yet, never a stale/blank "current" trip
+		}
 		switch {
 		case best == nil, rank[t.Status] < rank[best.Status]:
 			best = t

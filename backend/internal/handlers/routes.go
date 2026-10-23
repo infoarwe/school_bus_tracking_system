@@ -89,6 +89,41 @@ func (a *API) GetRoute(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, route)
 }
 
+// routeScheduleType is one trip type's part of the GetRouteScheduleHandler response.
+type routeScheduleType struct {
+	Supported bool    `json:"supported"`
+	StartTime *string `json:"start_time"`
+	EndTime   *string `json:"end_time"`
+}
+
+type routeScheduleResponse struct {
+	MorningPickup routeScheduleType `json:"morning_pickup"`
+	EveningDrop   routeScheduleType `json:"evening_drop"`
+}
+
+// GetRouteScheduleHandler reports what this route's Morning Pickup and Evening
+// Drop actually run as, derived live from its stops' own pickup_time/drop_time
+// (never invented): Daily Trips and Trip Planner both prefill from this rather
+// than asking the admin to retype a schedule the route's stops already define.
+// supported=false means the route doesn't run that type at all; supported=true
+// with a null start_time/end_time means it does, but none of its stops have a
+// time set yet, so there's nothing to prefill — the admin still enters one.
+func (a *API) GetRouteScheduleHandler(w http.ResponseWriter, r *http.Request) {
+	id, ok := idParam(w, r, "routeID")
+	if !ok {
+		return
+	}
+	sched, err := store.GetRouteSchedule(r.Context(), a.Store.Pool, chi.URLParam(r, "schoolID"), id)
+	if err != nil {
+		storeError(w, r, err, nil)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, routeScheduleResponse{
+		MorningPickup: routeScheduleType{Supported: sched.SupportsPickup, StartTime: sched.PickupStartTime, EndTime: sched.PickupEndTime},
+		EveningDrop:   routeScheduleType{Supported: sched.SupportsDrop, StartTime: sched.DropStartTime, EndTime: sched.DropEndTime},
+	})
+}
+
 func (a *API) CreateRoute(w http.ResponseWriter, r *http.Request) {
 	schoolID := chi.URLParam(r, "schoolID")
 	var req routeRequest

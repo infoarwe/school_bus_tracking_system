@@ -1,6 +1,9 @@
 import { api, getData, getPage, send } from './api'
 import type {
   BulkTripsInput,
+  BulkUnassignFilter,
+  BulkUnassignPreviewResult,
+  BulkUnassignResult,
   CopyTripsResult,
   PlannedPath,
   RouteSnapshot,
@@ -51,4 +54,24 @@ export const tripsApi = {
     send<CopyTripsResult>('post', `${base(schoolId)}/bulk`, body),
   calendar: (schoolId: string, from: string, to: string) =>
     getData<TripCalendarDay[]>(`${base(schoolId)}/calendar`, { from, to }),
+  /** Clears bus and driver together; route/schedule/stops/students untouched.
+   * Safe to call again on an already-unassigned trip. */
+  unassign: (schoolId: string, id: string) => send<Trip>('post', `${base(schoolId)}/${id}/unassign`),
+  /** Per-trip result: each ID either "unassigned" or "skipped" with a reason. */
+  bulkUnassign: (schoolId: string, tripIds: string[]) =>
+    send<BulkUnassignResult>('post', `${base(schoolId)}/unassign`, { trip_ids: tripIds }),
+  /** Date-range/All Dates alternative to an explicit trip_ids list (Trip
+   * Planner's cross-date flow) — resolved server-side, capped at 500. */
+  bulkUnassignFilter: (schoolId: string, filter: BulkUnassignFilter) =>
+    send<BulkUnassignResult>('post', `${base(schoolId)}/unassign`, filter),
+  /** Exact matching count (eligible/ineligible split) + auto-detected date
+   * span for the same filter, before confirming. */
+  bulkUnassignPreview: (schoolId: string, filter: BulkUnassignFilter) =>
+    send<BulkUnassignPreviewResult>('post', `${base(schoolId)}/unassign/preview`, filter),
+  /** Replaces just the driver (or just the bus) — bus/route/schedule (or
+   * driver/route/schedule) and everything else stay exactly as they are. */
+  reassignDriver: (schoolId: string, id: string, driverId: string) =>
+    send<Trip>('patch', `${base(schoolId)}/${id}/driver`, { driver_id: driverId }),
+  reassignBus: (schoolId: string, id: string, busId: string) =>
+    send<Trip>('patch', `${base(schoolId)}/${id}/bus`, { bus_id: busId }),
 }

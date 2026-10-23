@@ -52,7 +52,10 @@ func mapErr(err error) error {
 		return ErrNotFound
 	}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	// 23505 unique_violation, 23P01 exclusion_violation (e.g. trips_bus_no_overlap) —
+	// both name the offending constraint the same way, so callers that switch on
+	// ConflictError.Constraint (writeTripError, claimConflicts) need no change.
+	if errors.As(err, &pgErr) && (pgErr.Code == "23505" || pgErr.Code == "23P01") {
 		return &ConflictError{Constraint: pgErr.ConstraintName}
 	}
 	return err

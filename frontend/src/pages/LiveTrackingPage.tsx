@@ -30,7 +30,13 @@ import LiveMap from '../components/LiveMap'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
 import StopProgressList from '../components/StopProgressList'
-import { busState, busStateColors, pathColors, type BusState } from '../components/liveMapTypes'
+import {
+  busState,
+  busStateColors,
+  pathColors,
+  primaryLabel,
+  type BusState,
+} from '../components/liveMapTypes'
 import { useCurrentSchool } from '../context/SchoolContext'
 import { useLiveBuses, type TrailPoint } from '../hooks/useLiveBuses'
 import { trackApi } from '../services/admin'
@@ -248,7 +254,7 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
       !live.buses[t.id] &&
       (typeFilter === 'all' || t.trip_type === typeFilter) &&
       stateFilter === 'all' &&
-      matches(t.bus.vehicle_number, t.route?.code ?? t.title, t.driver.name),
+      matches(t.bus?.vehicle_number ?? '', t.route?.code ?? t.title, t.driver?.name ?? ''),
   )
 
   const select = (id: string) => {
@@ -303,9 +309,9 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
           >
             <BusGlyph color={busStateColors[state]} />
             <div className="stop-row__body">
-              <Typography.Text strong>{b.bus_number}</Typography.Text>
+              <Typography.Text strong>{primaryLabel(b)}</Typography.Text>
               <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
-                {b.route_code} · {tripTypeLabels[b.trip_type]}
+                Bus {b.bus_number} · {tripTypeLabels[b.trip_type]}
               </Typography.Text>
             </div>
             <Flex vertical align="flex-end" gap={2} style={{ flex: 'none' }}>
@@ -324,9 +330,9 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
         <div key={t.id} className="stop-row" style={{ cursor: 'default' }}>
           <BusGlyph color={token.colorTextQuaternary} />
           <div className="stop-row__body">
-            <Typography.Text strong>{t.bus.vehicle_number}</Typography.Text>
+            <Typography.Text strong>{t.route?.code ?? t.title ?? 'Trip'}</Typography.Text>
             <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>
-              {t.route?.code ?? t.title} · {tripTypeLabels[t.trip_type]}
+              Bus {t.bus?.vehicle_number} · {tripTypeLabels[t.trip_type]}
             </Typography.Text>
             <Typography.Text type="warning" style={{ fontSize: 12 }}>
               Started, waiting for GPS from the Driver app
@@ -348,16 +354,16 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
         />
         <BusGlyph color={busStateColors[busState(selected)]} />
         <div style={{ minWidth: 0 }}>
-          <Typography.Text strong>{selected.bus_number}</Typography.Text>
+          <Typography.Text strong>{primaryLabel(selected)}</Typography.Text>
           <br />
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {selected.route_code} · {tripTypeLabels[selected.trip_type]}
+            Bus {selected.bus_number} · {tripTypeLabels[selected.trip_type]}
           </Typography.Text>
         </div>
       </Flex>
       <Typography.Text style={{ fontSize: 13 }}>
         Driver: <strong>{selected.driver_name}</strong>
-        {selectedTrip?.driver.mobile && (
+        {selectedTrip?.driver?.mobile && (
           <>
             {' · '}
             <a href={`tel:${selectedTrip.driver.mobile}`}>
@@ -449,15 +455,16 @@ function LiveTracking({ schoolId }: { schoolId: string }) {
   const renderInfo = (b: BusLocation) => {
     const state = busState(b)
     const next = nextStop(b.trip_id)
-    const mobile = startedTrips.find((t) => t.id === b.trip_id)?.driver.mobile
+    const mobile = startedTrips.find((t) => t.id === b.trip_id)?.driver?.mobile
     return (
       <div style={{ fontSize: 13, lineHeight: 1.7, color: '#1f2937' }}>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>{primaryLabel(b)}</div>
         <div>
           <Tag color={stateTagColors[state]}>{stateLabels[state]}</Tag>
           <span style={{ color: '#6b7280' }}>{stateDetail(b, now)}</span>
         </div>
         <div>
-          Route <strong>{b.route_code}</strong> · {tripTypeLabels[b.trip_type]}
+          Bus <strong>{b.bus_number}</strong> · {tripTypeLabels[b.trip_type]}
         </div>
         <div>
           Driver <strong>{b.driver_name}</strong>

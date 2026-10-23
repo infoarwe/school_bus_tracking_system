@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.19.0
+  version: 0.26.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -170,6 +170,63 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.26.0: `BusLocation` (the live-tracking WebSocket payload) gains `trip_title` — additive, nothing removed —
+      the outing's own name, set only when `route_code` is `""` (a routeless Special Trip/Outing), so the admin
+      web's Live Tracking screen has something besides a blank route code to fall back to now that the route code
+      is its primary label instead of the bus number.
+    - 0.25.1: Fixed a second bug in 0.25.0's fix itself: re-assigning with a schedule that didn't overlap the
+      existing unassigned trip's own (old) schedule still fell through to creating a brand-new trip, leaving the
+      old one orphaned (unassigned) forever — each such mismatch grew the total trip count by one, which is
+      exactly what repeated Bulk Unassign → Bulk Assign cycles were doing. `POST /trips`, `POST /trips/bulk` and
+      `POST /trips/copy` now reuse the one matching unassigned trip for a route+date+type regardless of its old
+      schedule (only falling back to the overlap check when more than one unassigned candidate exists for that
+      slot, an ambiguous and rarer case).
+    - 0.25.0: Fixed a bug where re-assigning trips after Bulk Unassign (or Unassign) was rejected with "route:
+      This route already has an overlapping trip at that time" — the pre-existing, now fully-unassigned trip was
+      being treated as a duplicate route conflict against itself. `POST /trips`, `POST /trips/bulk` and
+      `POST /trips/copy` now fill in a matching, fully-unassigned trip instead of rejecting or duplicating it; a
+      genuine conflict (a different, still-assigned trip, or a busy bus/driver) is still rejected exactly as before.
+    - 0.24.0: Bulk Unassign's filter mode no longer requires a date signal — a bare `route_id`/`bus_id`/
+      `driver_id`/`trip_type` is now a meaningful scope on its own, and `POST /trips/unassign/preview`
+      auto-detects its applicable date span directly from the matching trips (earliest/latest
+      `trip_date`), so the admin never has to work out a date range by hand. The preview response also
+      now splits the count into `eligible`/`ineligible` and reports `over_limit`/`limit` so the 500-trip
+      cap is visible before confirming, not just as a 400 on the real attempt. A completely bare filter
+      (no date signal and no route/bus/driver/trip_type) is still rejected, same as before.
+    - 0.23.0: `POST /trips/unassign` (Bulk Unassign) gains a date-range/All Dates filter mode —
+      `all_dates`/`from`/`to`, optionally narrowed by `route_id`/`bus_id`/`driver_id`/`trip_type` — resolved
+      server-side (capped at 500 trips; a larger match is refused, not silently truncated), alongside the
+      existing explicit `trip_ids` list (still capped at 200, unchanged). Fixes Bulk Unassign being
+      silently limited to whichever single date happened to be on screen. New `POST
+      /trips/unassign/preview` returns the exact matching count and date span for the same filter, for a
+      confirmation step before acting.
+    - 0.22.0: **A trip can now exist with no bus and/or no driver** (`bus`/`driver` on `Trip` are now nullable,
+      the same pattern as `route`): `POST /trips/{id}/unassign` (and bulk: `POST /trips/unassign` with
+      `trip_ids`) clears both together; route, schedule, trip_date, trip_type, stops and students are
+      untouched. `PATCH /trips/{id}/driver` and `PATCH /trips/{id}/bus` replace just one side of an
+      assignment in one atomic step (no separate unassign-then-reassign), checked against the same overlap
+      rule as every other assignment in this feature, scoped to only the dimension being replaced — a
+      recurring driver_route_assignments entry and every other date's trips are never touched. All four are
+      audited (`trip.unassign`, `trip.reassign_driver`, `trip.reassign_bus`).
+    - 0.21.0: `GET /schools/{id}/routes/{routeID}/schedule` (additive): what a route's Morning Pickup/Evening
+      Drop actually run as, derived live from its stops' own `pickup_time`/`drop_time` (never invented). Daily
+      Trips and Trip Planner's Bulk Assign now prefill their scheduled-time fields from this when a route is
+      chosen, instead of asking the admin to retype a schedule the route's stops already define; the admin can
+      still edit the prefilled times. Fixes Trip Planner's Bulk Assign previously never sending a schedule at
+      all (always schedule-less, so every bulk-assigned trip fell back to the one-per-route/bus/driver/day
+      rule instead of real overlap checking).
+    - 0.20.0: **A bus, driver or route may now have more than one scheduled trip on the same date and trip
+      type**, as long as their scheduled windows don't overlap (e.g. the same bus running Route A at 7:30 and
+      Route B at 9:30). `TripInput` gains `scheduled_start_time`/`scheduled_end_time` (HH:MM, school-local);
+      `Trip` gains `scheduled_start_at`/`scheduled_end_at` (RFC 3339, null for a trip that predates this field).
+      `trip_conflict` (409) now means a genuine time overlap, not merely "already has a trip that day" — the old
+      `trips_{route,bus,driver}_slot_key` one-per-day constraints are replaced by time-range exclusion
+      constraints for trips that have a schedule; a trip with no schedule keeps the original one-per-day rule
+      instead (nothing to compare for overlap), restored as partial unique indexes scoped to schedule-less
+      rows. Existing trips without a derivable schedule keep `scheduled_start_at`/`scheduled_end_at` as `null`
+      and are unaffected. `POST /trips/bulk` gains `morning_start_time`/`morning_end_time`/
+      `evening_start_time`/`evening_end_time` (optional per trip type, same "give both or neither" rule as a
+      single trip's own scheduled_start_time/end_time).
     - 0.19.0: `POST /schools/{id}/clear-data` (Super Admin, admin web): clear a school's test data by part, with
       a dry-run preview and the school code as confirmation. Removed drivers' and parents' logins stop working.
     - 0.18.0: Trip Planner (admin web, additive): `POST /schools/{id}/trips/bulk` (one route + bus + driver on many
@@ -1793,6 +1850,39 @@ paths:
                         pickup_stop_id: { type: [string, "null"], format: uuid }
                         drop_stop_id: { type: [string, "null"], format: uuid }
 
+  /api/v1/schools/{schoolID}/routes/{routeID}/schedule:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/RouteID" }
+    get:
+      tags: [Routes & stops]
+      summary: What this route's Morning Pickup/Evening Drop actually run as
+      description: >-
+        Derived live from the route's own stops' pickup_time/drop_time (first stop's time = start,
+        last stop's time + 15 min nominal arrival buffer = end) — never invented. `supported: false`
+        means the route doesn't run that trip type at all; `supported: true` with null times means
+        it does, but none of its stops have that time set yet. Daily Trips and Trip Planner's Bulk
+        Assign both prefill their scheduled_start_time/scheduled_end_time (or
+        morning_start_time/morning_end_time, evening_start_time/evening_end_time) from this.
+      operationId: getRouteSchedule
+      responses:
+        "200":
+          description: The route's Morning Pickup and Evening Drop windows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      morning_pickup: { $ref: "#/components/schemas/RouteScheduleWindow" }
+                      evening_drop: { $ref: "#/components/schemas/RouteScheduleWindow" }
+                example:
+                  data:
+                    morning_pickup: { supported: true, start_time: "07:10", end_time: "07:45" }
+                    evening_drop: { supported: true, start_time: null, end_time: null }
+
   /api/v1/schools/{schoolID}/parents:
     parameters:
       - { $ref: "#/components/parameters/SchoolID" }
@@ -2075,7 +2165,13 @@ paths:
       description: |
         Driver + Bus + Route + Date + Trip Type. On one date and trip type a route, a bus and a driver can each be in
         only one trip (`409 trip_conflict`, `fields` names which). Route, bus and driver must be active; the route must
-        run the trip type and have stops; the date must be today to 90 days ahead (school time zone).
+        run the trip type and have stops; the date must be today to 90 days ahead (school time zone). If this exact
+        route+date+type already has exactly one trip that is fully unassigned (left by `POST .../unassign`, no bus
+        and no driver), this fills that trip in — including giving it this request's own schedule, even if that
+        schedule doesn't overlap what it had before — instead of rejecting it as a duplicate route conflict or
+        creating a second row for the same slot (which would otherwise leave the old one orphaned forever). The bus
+        and driver are still checked for a genuine conflict elsewhere first. `201` either way; audited as
+        `trip.create` for a genuinely new trip, `trip.reassign` when filling one in.
       operationId: createTrip
       requestBody:
         required: true
@@ -2097,7 +2193,11 @@ paths:
     post:
       tags: [Trips]
       summary: Copy a day's trips to other dates
-      description: Copies that clash or whose route, bus or driver is no longer usable are skipped and listed.
+      description: >-
+        Copies that clash or whose route, bus or driver is no longer usable are skipped and listed. A target date
+        that already has exactly one matching, fully-unassigned trip for that route/type (left by
+        `POST .../unassign`) is filled in — with this copy's own schedule — instead of being skipped as a
+        duplicate or left orphaned alongside a newly-created second trip.
       operationId: copyTrips
       requestBody:
         required: true
@@ -2141,8 +2241,15 @@ paths:
       description: |
         Plans ahead (Trip Planner): creates a scheduled trip for each date × trip type. Route, bus and driver are
         checked once, like `POST /trips` (`400` with `fields` if unusable). A date in the past or more than 90 days
-        ahead, or a slot where the route, bus or driver already has a trip, is skipped and listed; existing trips
-        are never changed, so sending the same request again creates nothing. Audited as `trip.bulk_create`.
+        ahead, or a slot where the route, bus or driver already has a genuinely conflicting trip, is skipped and
+        listed. The same route, bus or driver may already have a different, non-overlapping trip that date — only a
+        genuine time overlap is skipped. A date+type slot that already has exactly one fully-unassigned trip for
+        that route (left by `POST .../unassign`) is filled in with this request's own schedule, even if that
+        schedule doesn't overlap what the trip had before, rather than being skipped or left orphaned alongside a
+        newly-created second trip — this is how re-assigning after a bulk unassign works. Every other
+        already-assigned trip is left exactly as it was, and sending the same request again creates/fills nothing
+        further. Audited as `trip.bulk_create` (counts both
+        newly-created and filled-in trips under `created`).
       operationId: bulkCreateTrips
       requestBody:
         required: true
@@ -2158,12 +2265,20 @@ paths:
                 bus_id: { type: string, format: uuid }
                 driver_id: { type: string, format: uuid }
                 notes: { type: string, maxLength: 500 }
+                morning_start_time: { type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$", description: "Optional, for morning_pickup; give both morning_start_time and morning_end_time, or neither (no schedule, never invented)." }
+                morning_end_time: { type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$" }
+                evening_start_time: { type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$", description: "Optional, for evening_drop; give both evening_start_time and evening_end_time, or neither." }
+                evening_end_time: { type: string, pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$" }
             example:
               dates: ["2026-10-19", "2026-10-20", "2026-10-21"]
               trip_types: [morning_pickup, evening_drop]
               route_id: 6f1c2a9e-0d1b-4f43-9a51-2b7f7c1d9e10
               bus_id: 0b8e4c55-6a8f-4e7e-8d3e-5d6f1a2b3c4d
               driver_id: 9a7d3e21-2c4b-4b8a-a1f0-3e5d7c9b1a2f
+              morning_start_time: "07:30"
+              morning_end_time: "08:15"
+              evening_start_time: "16:00"
+              evening_end_time: "16:45"
       responses:
         "200":
           description: Result (same shape as copy).
@@ -2315,6 +2430,228 @@ paths:
             application/json:
               schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
         "400": { $ref: "#/components/responses/ValidationFailed" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/unassign:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    post:
+      tags: [Trips]
+      summary: Unassign a trip's bus and driver
+      description: >-
+        Clears bus and driver together; route, schedule, trip_date, trip_type, stops and students are
+        untouched. Only while the trip is still scheduled or confirmed (409 trip_state_conflict otherwise,
+        same as cancel). A confirmed trip resets to scheduled first. Calling this again on an
+        already-unassigned trip succeeds (200) rather than erroring — safe to retry. Audited as
+        `trip.unassign`.
+      operationId: unassignTrip
+      responses:
+        "200":
+          description: Unassigned (or already was).
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/trips/unassign:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    post:
+      tags: [Trips]
+      summary: Unassign many trips at once (Bulk Unassign)
+      description: >-
+        Either an explicit `trip_ids` list (Daily Trips' row selection, at most 200 — never a cross-date
+        operation by itself) or a filter (Trip Planner's cross-date flow, resolved server-side at
+        confirm time against the live data — never a frozen snapshot from when it was previewed — at
+        most 500 matching trips; a larger match is refused with a 400 asking to narrow the filter rather
+        than silently acting on a subset). The filter needs `all_dates`, or `from`/`to`, OR just a
+        `route_id`/`bus_id`/`driver_id`/`trip_type` on its own — in that last case the applicable date
+        span is auto-detected from the matching trips themselves (see `/trips/unassign/preview`), so the
+        caller is never forced to work out a date range by hand; a completely bare filter (none of the
+        above) is rejected rather than silently defaulting to "every trip". Either way, each trip ID is
+        its own transaction: one ineligible, already-changed, or cross-school trip is reported and
+        skipped, never silently dropped, never blocking the rest. A trip ID outside the caller's school
+        comes back as a "not found" skip reason — the same tenant-isolation behavior as every other
+        school-scoped lookup; a filter never resolves another school's trips at all, since it is itself
+        school-scoped.
+      operationId: bulkUnassignTrips
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: >-
+                Give trip_ids, or at least one of all_dates/from/to/route_id/bus_id/driver_id/trip_type.
+              properties:
+                trip_ids: { type: array, maxItems: 200, uniqueItems: true, items: { type: string, format: uuid } }
+                all_dates: { type: boolean, description: "Every eligible date (optionally narrowed by the filters below), not just the ones currently on screen." }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+                route_id: { type: string, format: uuid }
+                bus_id: { type: string, format: uuid }
+                driver_id: { type: string, format: uuid }
+                trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
+            examples:
+              explicit_ids:
+                summary: Explicit selection (Daily Trips)
+                value: { trip_ids: [6f1c2a9e-0d1b-4f43-9a51-2b7f7c1d9e10, 0b8e4c55-6a8f-4e7e-8d3e-5d6f1a2b3c4d] }
+              date_range:
+                summary: Date range, optionally filtered by driver
+                value: { from: "2026-10-23", to: "2026-11-05", driver_id: 9a7d3e21-2c4b-4b8a-a1f0-3e5d7c9b1a2f }
+              all_dates:
+                summary: All eligible dates for one route
+                value: { all_dates: true, route_id: 6f1c2a9e-0d1b-4f43-9a51-2b7f7c1d9e10 }
+              auto_detected_route:
+                summary: Route alone — date span auto-detected from its own matching trips
+                value: { route_id: 6f1c2a9e-0d1b-4f43-9a51-2b7f7c1d9e10 }
+      responses:
+        "200":
+          description: Per-trip result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      results:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            trip_id: { type: string, format: uuid }
+                            status: { type: string, enum: [unassigned, skipped] }
+                            reason: { type: string, description: Present only when status is skipped. }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/schools/{schoolID}/trips/unassign/preview:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+    post:
+      tags: [Trips]
+      summary: Preview a Bulk Unassign scope before confirming, with auto-detected date span
+      description: >-
+        The exact count of matching (non-cancelled) trips, split into eligible (scheduled/confirmed —
+        what the real operation would act on) and ineligible (already started/completed — would come
+        back skipped with a reason), plus the earliest/latest date among all of them — for the same
+        filter `POST /trips/unassign` would accept in filter mode. A route_id/bus_id/driver_id/trip_type
+        filter needs no date range at all: the earliest/latest span shown here is auto-detected directly
+        from that filter's own matching trip records (never derived from today's date, a route's creation
+        date, or a guessed recurring schedule). Shown before the confirm step becomes available —
+        especially for All Dates — so the admin always sees the real scope first. `over_limit` is true
+        when `count` exceeds the 500-trip cap the real operation enforces; `limit` echoes that cap.
+      operationId: bulkUnassignPreview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: []
+              description: >-
+                At least one of all_dates/from/to/route_id/bus_id/driver_id/trip_type is required — a
+                completely bare filter is rejected rather than silently matching every trip.
+              properties:
+                all_dates: { type: boolean }
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+                route_id: { type: string, format: uuid }
+                bus_id: { type: string, format: uuid }
+                driver_id: { type: string, format: uuid }
+                trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
+            examples:
+              date_range:
+                summary: Explicit date range
+                value: { from: "2026-10-23", to: "2026-11-05" }
+              auto_detected_route:
+                summary: Route alone — date span auto-detected from its own matching trips
+                value: { route_id: 6f1c2a9e-0d1b-4f43-9a51-2b7f7c1d9e10 }
+      responses:
+        "200":
+          description: Scope of the matching trips.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      count: { type: integer, description: "Total matching, regardless of eligibility." }
+                      eligible: { type: integer, description: "Scheduled/confirmed — what would actually be unassigned." }
+                      ineligible: { type: integer, description: "Already started/completed — would be skipped with a reason." }
+                      from: { type: [string, "null"], format: date, description: Auto-detected earliest matching trip_date. }
+                      to: { type: [string, "null"], format: date, description: Auto-detected latest matching trip_date. }
+                      over_limit: { type: boolean, description: "True when count exceeds limit — the real operation would then be refused." }
+                      limit: { type: integer, description: The matching-trips cap the real operation enforces. }
+                example:
+                  data: { count: 37, eligible: 35, ineligible: 2, from: "2026-10-23", to: "2026-11-05", over_limit: false, limit: 500 }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/driver:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    patch:
+      tags: [Trips]
+      summary: Replace a trip's driver (Part D/E)
+      description: >-
+        One atomic step — no separate unassign-then-reassign. Bus, route, schedule and everything else
+        are untouched; only this one trip row changes (a recurring driver_route_assignments entry, and
+        every other date's trips, are never touched). The new driver is checked only on the driver
+        dimension against this trip's own existing schedule, using the same overlap rule as every other
+        assignment in this feature (409 trip_conflict on a genuine overlap). Audited as
+        `trip.reassign_driver`.
+      operationId: reassignTripDriver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [driver_id]
+              properties:
+                driver_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TripStateConflict" }
+
+  /api/v1/schools/{schoolID}/trips/{tripID}/bus:
+    parameters:
+      - { $ref: "#/components/parameters/SchoolID" }
+      - { $ref: "#/components/parameters/TripID" }
+    patch:
+      tags: [Trips]
+      summary: Replace a trip's bus (Part F)
+      description: Same pattern as PATCH .../driver, checked only on the bus dimension. Audited as `trip.reassign_bus`.
+      operationId: reassignTripBus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bus_id]
+              properties:
+                bus_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { $ref: "#/components/schemas/Trip" } } }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/TripStateConflict" }
 
   /api/v1/schools/{schoolID}/settings/maps:
@@ -3732,7 +4069,8 @@ components:
         school_id: { type: string, format: uuid }
         trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
         route_id: { type: string, description: "\"\" for a routeless Special Trip/Outing." }
-        route_code: { type: string }
+        route_code: { type: string, description: "\"\" for a routeless Special Trip/Outing — see trip_title." }
+        trip_title: { type: string, description: "The outing's own name — set only when route_code is \"\" (a routeless Special Trip/Outing), for display in place of a route code." }
         bus_number: { type: string }
         driver_name: { type: string }
         latitude: { type: number }
@@ -3749,6 +4087,7 @@ components:
         trip_type: morning_pickup
         route_id: 5e000000-0000-4000-8000-000000000040
         route_code: RS-01
+        trip_title: ""
         bus_number: TN-38-AB-1234
         driver_name: Kumar
         latitude: 11.0172
@@ -3794,7 +4133,9 @@ components:
         route_id is required for morning_pickup/evening_drop. For special_trip it is
         optional: a template route (one with supports_outing) may be given, or it may
         be omitted for a fully ad-hoc outing — in which case title and at least one
-        waypoint are required instead.
+        waypoint are required instead. A bus, driver or route may now have more than
+        one trip on the same date and type, as long as their scheduled windows don't
+        overlap (409 trip_conflict if they do).
       properties:
         trip_date: { type: string, format: date, example: "2026-10-07" }
         trip_type: { type: string, enum: [morning_pickup, evening_drop, special_trip] }
@@ -3802,6 +4143,20 @@ components:
         bus_id: { type: string, format: uuid }
         driver_id: { type: string, format: uuid }
         notes: { type: string, maxLength: 500 }
+        scheduled_start_time:
+          type: string
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          example: "07:30"
+          description: >
+            HH:MM, school-local (same convention as a stop's pickup_time/drop_time).
+            Give both scheduled_start_time and scheduled_end_time, or neither — "neither"
+            is only valid when copying or bulk-creating from a trip that itself has no
+            scheduled window (a legacy trip created before this field existed). An end
+            time at or before the start means the trip runs past midnight.
+        scheduled_end_time:
+          type: string
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          example: "08:15"
         title: { type: string, maxLength: 200, description: "Special Trip/Outing name, shown instead of a route name. Required when special_trip has no route_id." }
         notify_parents:
           type: boolean
@@ -3835,17 +4190,28 @@ components:
             name: { type: string }
             stop_count: { type: integer }
         bus:
-          type: object
+          type: [object, "null"]
+          description: Null exactly when this trip has been unassigned (POST .../unassign); never invented.
           properties:
             id: { type: string, format: uuid }
             vehicle_number: { type: string }
             capacity: { type: integer }
         driver:
-          type: object
+          type: [object, "null"]
+          description: Null exactly when this trip has been unassigned; see bus.
           properties:
             id: { type: string, format: uuid }
             name: { type: string }
             mobile: { type: string }
+        scheduled_start_at:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            Null for a trip created before this field existed, or whose route has no
+            stop times to derive one from at the time of the upgrade migration — such a
+            trip has no overlap protection against other trips on the same bus, driver
+            or route.
+        scheduled_end_at: { type: [string, "null"], format: date-time }
         student_count: { type: integer, description: Students on the route with a stop for this trip type (0 for special_trip). }
         title: { type: string, description: Special Trip/Outing name; "" for route-based trips. }
         notify_parents: { type: boolean, description: special_trip only; see TripInput. }
@@ -4190,6 +4556,13 @@ components:
               description: Evening Drop travel order, independent of sequence; null if this stop is not part of the evening leg.
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
+    RouteScheduleWindow:
+      type: object
+      required: [supported, start_time, end_time]
+      properties:
+        supported: { type: boolean, description: "Whether the route runs this trip type at all." }
+        start_time: { type: [string, "null"], pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$", description: "Null if not supported, or supported but no stop has this time set yet." }
+        end_time: { type: [string, "null"], pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$" }
     Role:
       type: string
       enum: [super_admin, school_admin, transport_manager, driver, parent]

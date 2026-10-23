@@ -9,6 +9,8 @@ export interface BusLocation {
   trip_type: TripType
   route_id: string
   route_code: string
+  /** The outing's own name — set only when route_code is "" (a routeless Special Trip/Outing). */
+  trip_title: string
   bus_number: string
   driver_name: string
   latitude: number

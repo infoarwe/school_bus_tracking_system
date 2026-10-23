@@ -4,7 +4,7 @@ import type { BusLocation } from '../services/live'
 import type { StopStatus } from '../services/types'
 import { haversine, type LatLng } from '../utils/geo'
 import { busMarkerIcon } from './busMarker'
-import { busState, busStateColors, pathColors, type LiveMapProps } from './liveMapTypes'
+import { busState, busStateColors, pathColors, primaryLabel, type LiveMapProps } from './liveMapTypes'
 import { DEFAULT_CENTER } from './routeMapTypes'
 
 export default function GoogleLiveMap({
@@ -176,20 +176,21 @@ function BusMarker({
   const pos = useGlide(target)
   const heading = bus.heading
   const state = busState(bus)
+  const label = primaryLabel(bus)
   const icon = useMemo(
     () =>
       busMarkerIcon({
-        label: bus.bus_number,
+        label,
         color: busStateColors[state],
         heading: state === 'offline' || heading == null ? null : Math.round(heading / 5) * 5,
         selected,
       }),
-    [bus.bus_number, state, heading, selected],
+    [label, state, heading, selected],
   )
   return (
     <Marker
       position={pos}
-      title={`${bus.bus_number} · ${bus.route_code} · ${bus.driver_name}`}
+      title={`${label} · Bus ${bus.bus_number} · ${bus.driver_name}`}
       zIndex={selected ? 1000 : 100}
       onClick={onClick}
       icon={icon}
@@ -237,6 +238,15 @@ function Camera({
     .sort()
     .join(',')
   const selectedId = selected?.trip_id
+  // A content-derived key: stays the same string across renders where the path's
+  // shape hasn't actually changed, even though `plannedPath` itself is a brand new
+  // array on every location/progress tick (LiveTrackingPage recomputes it from
+  // objects the WebSocket reducer replaces on every message). Used below so the
+  // route-fit effect reruns only when the path truly changes, not on every GPS fix.
+  const plannedPathKey = plannedPath.length
+    ? `${plannedPath.length}:${plannedPath[0].lat.toFixed(5)},${plannedPath[0].lng.toFixed(5)}:` +
+      `${plannedPath[plannedPath.length - 1].lat.toFixed(5)},${plannedPath[plannedPath.length - 1].lng.toFixed(5)}`
+    : ''
 
   // Nothing selected: show every bus. Refit only when buses appear or disappear.
   useEffect(() => {
@@ -253,6 +263,8 @@ function Camera({
   }, [ids, selectedId, map])
 
   // A bus was selected (or its route loaded): show the whole route with the bus.
+  // Keyed on plannedPathKey (not plannedPath itself) so this does not re-run - and
+  // undo the admin's own zoom/pan - on every GPS fix once the route is already shown.
   useEffect(() => {
     if (!map || !selected) return
     if (plannedPath.length > 1) {
@@ -266,7 +278,7 @@ function Camera({
       if ((map.getZoom() ?? 0) < 14) map.setZoom(15)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, plannedPath, map])
+  }, [selectedId, plannedPathKey, map])
 
   // Follow the selected bus only when it drives out of view, so the user can pan around.
   useEffect(() => {
