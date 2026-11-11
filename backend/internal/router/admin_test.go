@@ -56,6 +56,15 @@ func TestReportsAll(t *testing.T) {
 	if trip[5] != "completed" || trip[10] != "0" || trip[11] != "1" {
 		t.Errorf("trip row = %v", trip)
 	}
+	// Preview rows carry the IDs their Trip/Route/Bus/Driver cells link to (never in the CSV).
+	tripRep := e.do("GET", f.base+"/reports/trips"+q, f.tm, nil).data()
+	links := tripRep["links"].([]any)[0].(map[string]any)
+	if links["trip"] != f.tripID || links["route"] != f.route || links["bus"] == nil || links["driver"] == nil {
+		t.Errorf("trip links = %v", links)
+	}
+	if c := tripRep["report"].(map[string]any)["columns"].([]any)[4].(map[string]any); c["key"] != "driver" || c["link"] != "driver" {
+		t.Errorf("driver column = %v", c)
+	}
 
 	// CSV: Excel byte-order mark, header row, spreadsheet formula neutralised.
 	req := httptest.NewRequest("GET", f.base+"/reports/delays"+q+"&format=csv", nil)

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: School Bus Tracking API
-  version: 0.26.0
+  version: 0.27.0
   description: |
     API for the School Bus Tracking admin web and the Android Driver and Parent apps.
 
@@ -170,6 +170,9 @@ info:
     released by the driver.
 
     ## Changelog
+    - 0.27.0: Reports preview (admin web, additive): `data.links` per row and `link` on columns, so Trip, Route, Bus and
+      Driver cells open their record. Trip and delay reports now also list Special Trips/Outings and trips without
+      a bus or driver (they were left out). CSV unchanged.
     - 0.26.0: `BusLocation` (the live-tracking WebSocket payload) gains `trip_title` — additive, nothing removed —
       the outing's own name, set only when `route_code` is `""` (a routeless Special Trip/Outing), so the admin
       web's Live Tracking screen has something besides a blank route code to fall back to now that the route code
@@ -3583,10 +3586,19 @@ paths:
         - { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 20 } }
       responses:
         "200":
-          description: "JSON: `data.report` (definition) and `data.rows` (arrays of strings in column order); or a CSV file."
+          description: |
+            JSON: `data.report` (definition), `data.rows` (arrays of strings in column order) and `data.links` (one
+            object per row: the IDs of the records its cells open, keyed `trip`, `route`, `bus`, `driver`; a column whose
+            definition has `link` opens that record). Or a CSV file (no IDs).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+              example:
+                data:
+                  report: { key: trips, columns: [{ key: date, label: Date }, { key: driver, label: Driver, link: driver }] }
+                  rows: [["2026-11-05", "RAJAMANI"]]
+                  links: [{ trip: 3f2b9c1e-8a41-4d6e-9b0a-1c2d3e4f5a6b, driver: 9a7d3e21-2c4b-4b8a-a1f0-3e5d7c9b1a2f }]
+                meta: { page: 1, page_size: 50, total: 1 }
             text/csv:
               schema: { type: string }
         "400": { $ref: "#/components/responses/ValidationFailed" }

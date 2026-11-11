@@ -1,5 +1,13 @@
 import { api, getData, getPage } from './api'
-import type { AuditRow, DashboardData, ListParams, PageMeta, ReportDef, TrackPoint } from './types'
+import type {
+  AuditRow,
+  DashboardData,
+  ListParams,
+  PageMeta,
+  ReportDef,
+  ReportRowLinks,
+  TrackPoint,
+} from './types'
 
 const school = (schoolId: string) => `/api/v1/schools/${schoolId}`
 
@@ -20,11 +28,12 @@ export const reportsApi = {
     page: number,
     pageSize: number,
   ) => {
-    const res = await api.get<{ data: { report: ReportDef; rows: string[][] }; meta: PageMeta }>(
-      `${school(schoolId)}/reports/${key}`,
-      { params: { ...query, page, page_size: pageSize } },
-    )
-    return { rows: res.data.data.rows, meta: res.data.meta }
+    const res = await api.get<{
+      data: { report: ReportDef; rows: string[][]; links?: ReportRowLinks[] }
+      meta: PageMeta
+    }>(`${school(schoolId)}/reports/${key}`, { params: { ...query, page, page_size: pageSize } })
+    const { rows, links } = res.data.data
+    return { rows, links: links ?? rows.map(() => ({})), meta: res.data.meta }
   },
   /** Downloads the full CSV (sent with the auth header, so not a plain link). */
   downloadCsv: async (schoolId: string, key: string, query: ReportQuery) => {

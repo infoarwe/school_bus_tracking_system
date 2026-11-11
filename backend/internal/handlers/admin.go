@@ -115,15 +115,16 @@ func (a *API) RunReport(w http.ResponseWriter, r *http.Request) {
 		internalError(w, r, err)
 		return
 	}
-	rows := [][]string{}
-	if err := store.RunReport(ctx, a.Store.Pool, rep, schoolID, f, pg.PageSize, pg.Offset(), func(row []string) error {
+	rows, links := [][]string{}, []map[string]string{}
+	if err := store.RunReport(ctx, a.Store.Pool, rep, schoolID, f, pg.PageSize, pg.Offset(), func(row []string, l map[string]string) error {
 		rows = append(rows, row)
+		links = append(links, l)
 		return nil
 	}); err != nil {
 		internalError(w, r, err)
 		return
 	}
-	httpx.JSONWithMeta(w, map[string]any{"report": rep, "rows": rows}, map[string]any{"page": pg.Page, "page_size": pg.PageSize, "total": total})
+	httpx.JSONWithMeta(w, map[string]any{"report": rep, "rows": rows, "links": links}, map[string]any{"page": pg.Page, "page_size": pg.PageSize, "total": total})
 }
 
 func (a *API) reportCSV(w http.ResponseWriter, r *http.Request, rep *store.ReportDef, schoolID string, f store.ReportFilter) {
@@ -142,7 +143,7 @@ func (a *API) reportCSV(w http.ResponseWriter, r *http.Request, rep *store.Repor
 	}
 	_ = cw.Write(header)
 	n := 0
-	err := store.RunReport(r.Context(), a.Store.Pool, rep, schoolID, f, maxReportCSVRows, 0, func(row []string) error {
+	err := store.RunReport(r.Context(), a.Store.Pool, rep, schoolID, f, maxReportCSVRows, 0, func(row []string, _ map[string]string) error {
 		for i := range row {
 			row[i] = csvSafe(row[i])
 		}

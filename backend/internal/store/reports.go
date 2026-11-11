@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Report definitions (CLAUDE.md "Reports"): trip, bus journey, driver trip, route
@@ -18,6 +20,9 @@ import (
 type ReportColumn struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
+	// Link says which record a cell of this column opens in the admin web (trip,
+	// route, bus or driver); the record's ID comes with each preview row.
+	Link string `json:"link,omitempty"`
 }
 
 type ReportDef struct {
@@ -27,6 +32,9 @@ type ReportDef struct {
 	Filters     []string       `json:"filters"` // from, to, route_id, bus_id, driver_id, trip_id
 	Columns     []ReportColumn `json:"columns"`
 	sql         string
+	// links names the record IDs the query selects after the visible columns
+	// (in order). They go to the preview as links, never into the CSV.
+	links []string
 }
 
 // ReportFilter holds the values; empty strings mean "any".
@@ -56,19 +64,29 @@ func (f ReportFilter) Value(name string) string {
 func cols(pairs ...string) []ReportColumn {
 	out := make([]ReportColumn, 0, len(pairs)/2)
 	for i := 0; i+1 < len(pairs); i += 2 {
-		out = append(out, ReportColumn{pairs[i], pairs[i+1]})
+		out = append(out, ReportColumn{Key: pairs[i], Label: pairs[i+1]})
 	}
 	return out
 }
 
+// linked marks columns (by key) as links to a record kind.
+func linked(cs []ReportColumn, keyToKind map[string]string) []ReportColumn {
+	for i := range cs {
+		cs[i].Link = keyToKind[cs[i].Key]
+	}
+	return cs
+}
+
 // Shared fragments.
 const (
+	// Route (Special Trip/Outing), bus and driver (unassigned trip) can be empty.
 	tripJoins = `
 		JOIN schools s ON s.id = t.school_id
-		JOIN routes r ON r.id = t.route_id
-		JOIN buses b ON b.id = t.bus_id
-		JOIN drivers d ON d.id = t.driver_id
-		JOIN users du ON du.id = d.user_id`
+		LEFT JOIN routes r ON r.id = t.route_id
+		LEFT JOIN buses b ON b.id = t.bus_id
+		LEFT JOIN drivers d ON d.id = t.driver_id
+		LEFT JOIN users du ON du.id = d.user_id`
+	tripLinks = `, t.id, r.id, b.id, d.id`
 	localTime = `to_char(%s AT TIME ZONE s.timezone, 'YYYY-MM-DD HH24:MI')`
 	clockTime = `to_char(%s AT TIME ZONE s.timezone, 'HH24:MI')`
 	minutes   = `round(extract(epoch FROM (%s - %s)) / 60)::int`
@@ -85,14 +103,15 @@ var Reports = []ReportDef{
 	{
 		Key: "trips", Title: "Trip report", Description: "Every trip in the period with its times, stops and delays.",
 		Filters: []string{"from", "to", "route_id", "bus_id", "driver_id"},
-		Columns: cols("date", "Date", "trip_type", "Trip", "route", "Route", "bus", "Bus", "driver", "Driver", "status", "Status",
+		Columns: linked(cols("date", "Date", "trip_type", "Trip", "route", "Route", "bus", "Bus", "driver", "Driver", "status", "Status",
 			"started", "Started", "ended", "Ended", "duration_min", "Duration (min)", "stops_reached", "Stops reached",
-			"stops_missed", "Stops missed", "delays", "Delays reported", "cancel_reason", "Cancel reason"),
-		sql: `SELECT t.trip_date::text, t.trip_type, r.code, b.vehicle_number, du.name, t.status,
+			"stops_missed", "Stops missed", "delays", "Delays reported", "cancel_reason", "Cancel reason"), map[string]string{"trip_type": "trip", "route": "route", "bus": "bus", "driver": "driver"}),
+		links: []string{"trip", "route", "bus", "driver"},
+		sql: `SELECT t.trip_date::text, t.trip_type, coalesce(r.code, nullif(t.title, '')), b.vehicle_number, du.name, t.status,
 			` + clock("t.started_at") + `, ` + clock("t.ended_at") + `, ` + fmt.Sprintf(minutes, "t.ended_at", "t.started_at") + `,
 			(SELECT count(*) FROM trip_stop_events e WHERE e.trip_id = t.id AND e.event_type = 'reached'),
 			(SELECT count(*) FROM trip_stop_events e WHERE e.trip_id = t.id AND e.missed),
-			(SELECT count(*) FROM delay_events de WHERE de.trip_id = t.id), t.cancel_reason
+			(SELECT count(*) FROM delay_events de WHERE de.trip_id = t.id), t.cancel_reason` + tripLinks + `
 			FROM trips t` + tripJoins + `
 			WHERE t.school_id = $1 AND t.trip_date BETWEEN $2::date AND $3::date
 			AND ($4 = '' OR t.route_id::text = $4) AND ($5 = '' OR t.bus_id::text = $5) AND ($6 = '' OR t.driver_id::text = $6)
@@ -101,8 +120,9 @@ var Reports = []ReportDef{
 	{
 		Key: "bus_journeys", Title: "Bus journey report", Description: "Per bus and day: trips, time on the road and distance (from GPS history).",
 		Filters: []string{"from", "to", "bus_id"},
-		Columns: cols("date", "Date", "bus", "Bus", "trips", "Trips", "completed", "Completed", "first_start", "First start",
-			"last_end", "Last end", "minutes_on_road", "Minutes on road", "distance_km", "Distance (km)"),
+		Columns: linked(cols("date", "Date", "bus", "Bus", "trips", "Trips", "completed", "Completed", "first_start", "First start",
+			"last_end", "Last end", "minutes_on_road", "Minutes on road", "distance_km", "Distance (km)"), map[string]string{"bus": "bus"}),
+		links: []string{"bus"},
 		sql: `WITH pts AS (
 				SELECT l.trip_id, l.latitude, l.longitude,
 					lag(l.latitude) OVER w AS plat, lag(l.longitude) OVER w AS plng
@@ -113,23 +133,24 @@ var Reports = []ReportDef{
 			SELECT t.trip_date::text, b.vehicle_number, count(*), count(*) FILTER (WHERE t.status = 'completed'),
 				` + clock("min(t.started_at)") + `, ` + clock("max(t.ended_at)") + `,
 				coalesce(sum(` + fmt.Sprintf(minutes, "t.ended_at", "t.started_at") + `), 0),
-				round(coalesce(sum(dist.km), 0)::numeric, 1)
+				round(coalesce(sum(dist.km), 0)::numeric, 1), b.id
 			FROM trips t JOIN schools s ON s.id = t.school_id JOIN buses b ON b.id = t.bus_id
 			LEFT JOIN dist ON dist.trip_id = t.id
 			WHERE t.school_id = $1 AND t.trip_date BETWEEN $2::date AND $3::date AND t.status <> 'cancelled'
 			AND ($4 = '' OR t.bus_id::text = $4)
-			GROUP BY t.trip_date, b.vehicle_number, s.timezone ORDER BY t.trip_date, b.vehicle_number`,
+			GROUP BY t.trip_date, b.id, b.vehicle_number, s.timezone ORDER BY t.trip_date, b.vehicle_number`,
 	},
 	{
 		Key: "driver_trips", Title: "Driver trip report", Description: "Per driver: trips assigned, completed and cancelled, delays, average duration.",
 		Filters: []string{"from", "to", "driver_id"},
-		Columns: cols("driver", "Driver", "mobile", "Mobile", "assigned", "Trips assigned", "completed", "Completed",
-			"cancelled", "Cancelled", "delays", "Delays reported", "avg_duration_min", "Avg duration (min)"),
+		Columns: linked(cols("driver", "Driver", "mobile", "Mobile", "assigned", "Trips assigned", "completed", "Completed",
+			"cancelled", "Cancelled", "delays", "Delays reported", "avg_duration_min", "Avg duration (min)"), map[string]string{"driver": "driver"}),
+		links: []string{"driver"},
 		sql: `SELECT du.name, du.mobile, count(t.id), count(t.id) FILTER (WHERE t.status = 'completed'),
 				count(t.id) FILTER (WHERE t.status = 'cancelled'),
 				(SELECT count(*) FROM delay_events de JOIN trips t2 ON t2.id = de.trip_id
 					WHERE t2.driver_id = d.id AND t2.trip_date BETWEEN $2::date AND $3::date),
-				round(avg(` + fmt.Sprintf(minutes, "t.ended_at", "t.started_at") + `))::int
+				round(avg(` + fmt.Sprintf(minutes, "t.ended_at", "t.started_at") + `))::int, d.id
 			FROM drivers d JOIN users du ON du.id = d.user_id
 			LEFT JOIN trips t ON t.driver_id = d.id AND t.trip_date BETWEEN $2::date AND $3::date
 			WHERE d.school_id = $1 AND ($4 = '' OR d.id::text = $4)
@@ -139,9 +160,10 @@ var Reports = []ReportDef{
 		Key: "route_performance", Title: "Route performance report",
 		Description: "Per route: completed trips, average duration, missed stops, delays, and how late the bus reached stops versus their scheduled time.",
 		Filters:     []string{"from", "to", "route_id"},
-		Columns: cols("route", "Route", "name", "Name", "trips", "Trips", "completed", "Completed", "avg_duration_min", "Avg duration (min)",
+		Columns: linked(cols("route", "Route", "name", "Name", "trips", "Trips", "completed", "Completed", "avg_duration_min", "Avg duration (min)",
 			"stops_reached", "Stops reached", "stops_missed", "Stops missed", "delays", "Delays", "avg_delay_min", "Avg reported delay (min)",
-			"avg_late_min", "Avg arrival vs schedule (min)"),
+			"avg_late_min", "Avg arrival vs schedule (min)"), map[string]string{"route": "route", "name": "route"}),
+		links: []string{"route"},
 		sql: `SELECT r.code, r.name, count(DISTINCT t.id), count(DISTINCT t.id) FILTER (WHERE t.status = 'completed'),
 				round(avg(` + fmt.Sprintf(minutes, "t.ended_at", "t.started_at") + `))::int,
 				(SELECT count(*) FROM trip_stop_events e JOIN trips x ON x.id = e.trip_id
@@ -156,7 +178,7 @@ var Reports = []ReportDef{
 						- CASE WHEN x.trip_type = 'morning_pickup' THEN st.pickup_time ELSE st.drop_time END)) / 60))::int
 					FROM trip_stop_events e JOIN trips x ON x.id = e.trip_id JOIN stops st ON st.id = e.stop_id
 					WHERE x.route_id = r.id AND x.trip_date BETWEEN $2::date AND $3::date AND e.event_type = 'reached'
-					AND CASE WHEN x.trip_type = 'morning_pickup' THEN st.pickup_time ELSE st.drop_time END IS NOT NULL)
+					AND CASE WHEN x.trip_type = 'morning_pickup' THEN st.pickup_time ELSE st.drop_time END IS NOT NULL), r.id
 			FROM routes r JOIN schools s ON s.id = r.school_id
 			LEFT JOIN trips t ON t.route_id = r.id AND t.trip_date BETWEEN $2::date AND $3::date AND t.status <> 'cancelled'
 			WHERE r.school_id = $1 AND ($4 = '' OR r.id::text = $4)
@@ -165,10 +187,11 @@ var Reports = []ReportDef{
 	{
 		Key: "delays", Title: "Delay report", Description: "Every delay and breakdown reported, with reason and who reported it.",
 		Filters: []string{"from", "to", "route_id", "bus_id", "driver_id"},
-		Columns: cols("reported_at", "Reported at", "trip_type", "Trip", "route", "Route", "bus", "Bus", "driver", "Driver",
-			"minutes", "Minutes", "reason", "Reason", "note", "Note", "reported_by", "Reported by", "reporter_role", "Role"),
-		sql: `SELECT ` + lt("x.created_at") + `, t.trip_type, r.code, b.vehicle_number, du.name, x.minutes, x.reason, x.note,
-				rep.name, x.reporter_role
+		Columns: linked(cols("reported_at", "Reported at", "trip_type", "Trip", "route", "Route", "bus", "Bus", "driver", "Driver",
+			"minutes", "Minutes", "reason", "Reason", "note", "Note", "reported_by", "Reported by", "reporter_role", "Role"), map[string]string{"trip_type": "trip", "route": "route", "bus": "bus", "driver": "driver"}),
+		links: []string{"trip", "route", "bus", "driver"},
+		sql: `SELECT ` + lt("x.created_at") + `, t.trip_type, coalesce(r.code, nullif(t.title, '')), b.vehicle_number, du.name, x.minutes,
+				x.reason, x.note, rep.name, x.reporter_role` + tripLinks + `
 			FROM delay_events x JOIN trips t ON t.id = x.trip_id` + tripJoins + `
 			LEFT JOIN users rep ON rep.id = x.reported_by
 			WHERE x.school_id = $1 AND t.trip_date BETWEEN $2::date AND $3::date
@@ -178,10 +201,11 @@ var Reports = []ReportDef{
 	{
 		Key: "assignments", Title: "Assignment report", Description: "Student route and stop assignments that were in effect during the period, with history.",
 		Filters: []string{"from", "to", "route_id"},
-		Columns: cols("admission_no", "Adm. no.", "student", "Student", "class", "Class", "route", "Route", "pickup_stop", "Pickup stop",
-			"drop_stop", "Drop stop", "from", "From", "to", "To", "assigned_by", "Assigned by"),
+		Columns: linked(cols("admission_no", "Adm. no.", "student", "Student", "class", "Class", "route", "Route", "pickup_stop", "Pickup stop",
+			"drop_stop", "Drop stop", "from", "From", "to", "To", "assigned_by", "Assigned by"), map[string]string{"route": "route"}),
+		links: []string{"route"},
 		sql: `SELECT st.admission_no, st.name, concat_ws('-', nullif(st.class, ''), nullif(st.section, '')), r.code, ps.name, ds.name,
-				` + lt("sa.assigned_at") + `, coalesce(` + lt("sa.ended_at") + `, 'current'), u.name
+				` + lt("sa.assigned_at") + `, coalesce(` + lt("sa.ended_at") + `, 'current'), u.name, r.id
 			FROM student_assignments sa
 			JOIN schools s ON s.id = sa.school_id
 			JOIN students st ON st.id = sa.student_id
@@ -197,12 +221,14 @@ var Reports = []ReportDef{
 	{
 		Key: "notifications", Title: "Notification report", Description: "Notifications sent to parents, with delivery and read counts.",
 		Filters: []string{"from", "to", "route_id"},
-		Columns: cols("sent_at", "Sent at", "type", "Type", "title", "Title", "route", "Route", "recipients", "Parents",
-			"pushed", "Pushed", "failed", "Failed", "read", "Read"),
+		Columns: linked(cols("sent_at", "Sent at", "type", "Type", "title", "Title", "route", "Route", "recipients", "Parents",
+			"pushed", "Pushed", "failed", "Failed", "read", "Read"), map[string]string{"route": "route"}),
+		links: []string{"route"},
 		sql: `SELECT ` + lt("n.created_at") + `, n.type, n.title, coalesce(r.code, 'Whole school'), n.recipient_count,
 				(SELECT count(*) FROM topic_deliveries p WHERE p.notification_id = n.id AND p.status = 'sent'),
 				(SELECT count(*) FROM topic_deliveries p WHERE p.notification_id = n.id AND p.status IN ('failed', 'config_missing')),
-				(SELECT count(DISTINCT user_id) FROM notification_recipients nr WHERE nr.notification_id = n.id AND nr.read_at IS NOT NULL)
+				(SELECT count(DISTINCT user_id) FROM notification_recipients nr WHERE nr.notification_id = n.id AND nr.read_at IS NOT NULL),
+				r.id
 			FROM notifications n JOIN schools s ON s.id = n.school_id LEFT JOIN routes r ON r.id = n.route_id
 			WHERE n.school_id = $1 AND (n.created_at AT TIME ZONE s.timezone)::date BETWEEN $2::date AND $3::date
 			AND ($4 = '' OR n.route_id::text = $4)
@@ -239,9 +265,10 @@ func (r *ReportDef) args(schoolID string, f ReportFilter) []any {
 	return args
 }
 
-// RunReport streams the report's rows as strings to emit. limit/offset 0 = all rows.
+// RunReport streams the report's rows as strings to emit, with the IDs of the
+// records the row links to (kind → ID, empty kinds left out). limit/offset 0 = all rows.
 func RunReport(ctx context.Context, q DBTX, r *ReportDef, schoolID string, f ReportFilter, limit, offset int,
-	emit func(row []string) error) error {
+	emit func(row []string, links map[string]string) error) error {
 	sql := r.sql
 	args := r.args(schoolID, f)
 	if limit > 0 {
@@ -257,11 +284,21 @@ func RunReport(ctx context.Context, q DBTX, r *ReportDef, schoolID string, f Rep
 		if err != nil {
 			return err
 		}
-		out := make([]string, len(vals))
-		for i, v := range vals {
+		n := len(r.Columns)
+		if len(vals) != n+len(r.links) {
+			return fmt.Errorf("report %s: %d values, want %d columns + %d links", r.Key, len(vals), n, len(r.links))
+		}
+		out := make([]string, n)
+		for i, v := range vals[:n] {
 			out[i] = formatCell(v)
 		}
-		if err := emit(out); err != nil {
+		links := map[string]string{}
+		for i, kind := range r.links {
+			if id := formatCell(vals[n+i]); id != "" {
+				links[kind] = id
+			}
+		}
+		if err := emit(out, links); err != nil {
 			return err
 		}
 	}
@@ -283,6 +320,8 @@ func formatCell(v any) string {
 		return x
 	case time.Time:
 		return x.Format(time.RFC3339)
+	case [16]byte: // uuid columns (link IDs)
+		return uuid.UUID(x).String()
 	case int64:
 		return strconv.FormatInt(x, 10)
 	case int32:

@@ -1,9 +1,63 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Flex, Modal, Segmented, Slider, Spin, Typography } from 'antd'
-import { PauseOutlined, CaretRightOutlined } from '@ant-design/icons'
+import { Alert, App, Button, Flex, Modal, Segmented, Slider, Spin, Typography } from 'antd'
+import { PauseOutlined, CaretRightOutlined, DownloadOutlined } from '@ant-design/icons'
 import RouteMap from './RouteMap'
+import { ApiError } from '../services/api'
 import { trackApi } from '../services/admin'
-import type { Stop, TrackPoint } from '../services/types'
+import { tripsApi } from '../services/trips'
+import type { RouteSnapshot, Stop, TrackPoint } from '../services/types'
+import { errorMessage } from '../utils/formErrors'
+
+/**
+ * Saves the trip's travelled-route PNG (the image made when it was completed),
+ * making it first if there is none yet. The live Google map itself cannot be
+ * saved as an image (the browser blocks reading Google's tiles).
+ */
+function DownloadRouteImage({
+  schoolId,
+  tripId,
+  fileName,
+}: {
+  schoolId: string
+  tripId: string
+  fileName: string
+}) {
+  const { message } = App.useApp()
+  const [busy, setBusy] = useState(false)
+
+  async function download() {
+    setBusy(true)
+    try {
+      let snap: RouteSnapshot | null = null
+      try {
+        snap = await tripsApi.routeSnapshot(schoolId, tripId)
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 404)) throw e
+      }
+      if (!snap?.has_image) snap = await tripsApi.makeRouteSnapshot(schoolId, tripId)
+      if (!snap.has_image) {
+        message.warning(snap.error || 'No route image could be made for this trip.')
+        return
+      }
+      const url = URL.createObjectURL(await tripsApi.routeSnapshotImage(schoolId, tripId))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (e) {
+      message.error(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Button icon={<DownloadOutlined />} loading={busy} onClick={() => void download()}>
+      Download PNG
+    </Button>
+  )
+}
 
 /**
  * Replays a trip's stored GPS track on the route map: play/pause, scrub, speed.
@@ -110,6 +164,13 @@ export default function TripReplay({
               {at?.speed_mps != null && ` · ${Math.round(at.speed_mps * 3.6)} km/h`}
             </Typography.Text>
             <Typography.Text type="secondary">{points.length} GPS points</Typography.Text>
+            <span style={{ marginInlineStart: 'auto' }}>
+              <DownloadRouteImage
+                schoolId={schoolId}
+                tripId={tripId}
+                fileName={`${title.replace(/[^\w-]+/g, '_')}.png`}
+              />
+            </span>
           </Flex>
           <Slider
             min={0}

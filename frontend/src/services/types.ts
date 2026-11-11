@@ -668,8 +668,13 @@ export interface ReportDef {
   title: string
   description: string
   filters: ReportFilterName[]
-  columns: { key: string; label: string }[]
+  /** link: a cell of this column opens that record (its ID is in the row's links). */
+  columns: { key: string; label: string; link?: ReportLinkKind }[]
 }
+
+export type ReportLinkKind = 'trip' | 'route' | 'bus' | 'driver'
+/** Per preview row: record IDs the row's cells link to. */
+export type ReportRowLinks = Partial<Record<ReportLinkKind, string>>
 
 export interface AuditRow {
   id: string

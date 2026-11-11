@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Alert, App, Button, Card, Flex, Input, Select, Table, Typography } from 'antd'
 import { DownloadOutlined, SearchOutlined } from '@ant-design/icons'
 import LoadingOrError from '../components/LoadingOrError'
 import PageHeader from '../components/PageHeader'
 import RequireSchool from '../components/RequireSchool'
+import TripDetailDrawer from '../components/TripDetailDrawer'
 import { useCurrentSchool } from '../context/SchoolContext'
 import { useLoad } from '../hooks/useLoad'
 import { reportsApi, type ReportQuery } from '../services/admin'
@@ -15,7 +17,9 @@ import {
   type BusRoute,
   type Driver,
   type ReportDef,
+  type ReportRowLinks,
   type Trip,
+  type TripType,
 } from '../services/types'
 import { addDays, todayIn } from '../utils/dates'
 import { errorMessage } from '../utils/formErrors'
@@ -47,9 +51,13 @@ function Reports({ schoolId }: { schoolId: string }) {
     drivers: [],
     trips: [],
   })
-  const [result, setResult] = useState<{ rows: string[][]; total: number; page: number } | null>(
-    null,
-  )
+  const [result, setResult] = useState<{
+    rows: string[][]
+    links: ReportRowLinks[]
+    total: number
+    page: number
+  } | null>(null)
+  const [viewingTrip, setViewingTrip] = useState<string | null>(null)
   const [busy, setBusy] = useState<'run' | 'csv' | null>(null)
 
   useEffect(() => {
@@ -87,7 +95,7 @@ function Reports({ schoolId }: { schoolId: string }) {
     setBusy('run')
     try {
       const res = await reportsApi.run(schoolId, def.key, cleanQuery(), page, PAGE_SIZE)
-      setResult({ rows: res.rows, total: res.meta.total, page })
+      setResult({ rows: res.rows, links: res.links, total: res.meta.total, page })
     } catch (e) {
       setResult(null)
       message.error(errorMessage(e))
@@ -248,14 +256,56 @@ function Reports({ schoolId }: { schoolId: string }) {
                 showSizeChanger: false,
                 onChange: (p) => void run(p),
               }}
-              columns={def.columns.map((c, i) => ({
-                title: c.label,
-                key: c.key,
-                render: (_: unknown, row: string[]) => row[i] || '—',
-              }))}
+              columns={[
+                ...def.columns.map((c, i) => ({
+                  title: c.label,
+                  key: c.key,
+                  render: (_: unknown, row: string[], index: number) => {
+                    const raw = row[i]
+                    if (!raw) return '—'
+                    const text =
+                      c.key === 'trip_type' ? (tripTypeLabels[raw as TripType] ?? raw) : raw
+                    const id = c.link && result.links[index]?.[c.link]
+                    if (!c.link || !id) return text
+                    if (c.link === 'trip') {
+                      return (
+                        <Typography.Link onClick={() => setViewingTrip(id)}>{text}</Typography.Link>
+                      )
+                    }
+                    const path = { route: 'routes', bus: 'buses', driver: 'drivers' }[c.link]
+                    return <Link to={`/${path}/${id}`}>{text}</Link>
+                  },
+                })),
+                // Trip-based reports: a Details button per row, like Daily Trips.
+                ...(def.columns.some((c) => c.link === 'trip')
+                  ? [
+                      {
+                        title: 'Actions',
+                        key: 'actions',
+                        fixed: 'right' as const,
+                        width: 100,
+                        render: (_: unknown, _row: string[], index: number) => {
+                          const tripId = result.links[index]?.trip
+                          return tripId ? (
+                            <Button size="small" onClick={() => setViewingTrip(tripId)}>
+                              Details
+                            </Button>
+                          ) : null
+                        },
+                      },
+                    ]
+                  : []),
+              ]}
             />
           )}
         </Card>
+      )}
+      {viewingTrip && (
+        <TripDetailDrawer
+          schoolId={schoolId}
+          tripId={viewingTrip}
+          onClose={() => setViewingTrip(null)}
+        />
       )}
     </Flex>
   )

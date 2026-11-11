@@ -37,6 +37,20 @@ $C ps             # api/nginx CREATED must be "seconds ago"; migrate Exited (0)
 curl -s https://ics.ridelogic.in/health
 ```
 
+Step 1 from **PowerShell** instead (no `gzip` there, and `|` breaks binary data): save to a file and copy it.
+
+```powershell
+docker save -o sbts-images.tar sbts-api:latest sbts-web:latest
+scp -P 2024 sbts-images.tar root@103.235.106.21:/tmp/
+ssh -p 2024 root@103.235.106.21 "docker load -i /tmp/sbts-images.tar && rm /tmp/sbts-images.tar"
+Remove-Item sbts-images.tar
+```
+
+**Database changes need no manual SQL.** Schema changes ship as migration files in the API image
+(`backend/internal/database/migrations`). On `up`, the `migrate` service applies any new ones before the new API
+starts (the API waits for it to exit 0). If `migrate` fails, the API does not start: check `$C logs migrate`, and
+restore the backup from step 2 if needed. Never edit the database by hand to "apply" a migration.
+
 The host Nginx terminates HTTPS and forwards to the stack on `127.0.0.1:8180`; Postgres is on `127.0.0.1:5434`
 (reach it with an SSH tunnel). Secrets live only in `/opt/school_bus_tracking/deploy/.env` on the server.
 
